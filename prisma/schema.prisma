@@ -1,0 +1,21 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model WordPair {
+  id        String   @id @default(uuid())
+  wordA     String   // Civilian word (similar word)
+  wordB     String   // Spy word (different but related word)
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@map("word_pairs")
+}
