@@ -2,6 +2,8 @@
 
 A real-time multiplayer social deduction web game built with Next.js and Socket.io.
 
+![whoispy logo](./public/whoispy-logo.png)
+
 ## Features
 
 - 🎮 Real-time multiplayer gameplay (3-8 players)

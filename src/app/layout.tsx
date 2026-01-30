@@ -4,6 +4,11 @@ import './globals.css'
 export const metadata: Metadata = {
   title: 'Who is the Spy - Online Game',
   description: 'A real-time multiplayer social deduction game',
+  icons: {
+    icon: '/whoispy-logo.ico',
+    shortcut: '/whoispy-logo.ico',
+    apple: '/whoispy-logo.png',
+  },
 }
 
 export default function RootLayout({
