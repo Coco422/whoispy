@@ -27,6 +27,14 @@ export interface Player {
   joinedAt: number
 }
 
+// Spectator interface
+export interface Spectator {
+  id: string
+  nickname: string
+  socketId: string
+  joinedAt: number
+}
+
 // Description submitted by a player
 export interface Description {
   playerId: string
@@ -54,9 +62,13 @@ export interface Room {
   code: string
   hostId: string
   players: Map<string, Player>
+  spectators: Map<string, Spectator>
+  spectatorSeats: number
+  spectatorQueue: string[] // 观战席加入顺序（用于游戏结束后补位）
   phase: GamePhase
   currentRound: number
   currentTurnIndex: number
+  turnOrder: string[] // 发言顺序基准（用于每回合正反交错）
   turnStartTime: number | null
   descriptionTime: number // 发言时间（秒）15/30/45/60
   discussionTime: number // 推理时间（秒）30/60/90/120
@@ -66,6 +78,7 @@ export interface Room {
   wordA: string | null // Civilian word
   wordB: string | null // Spy word
   usedWordPairIds: string[] // 已使用的词组ID列表
+  lastGameResult: GameResult | null
   createdAt: number
   lastActivityAt: number
 }
@@ -75,6 +88,8 @@ export interface SerializedRoom {
   code: string
   hostId: string
   players: Player[]
+  spectators: Spectator[]
+  spectatorSeats: number
   phase: GamePhase
   currentRound: number
   currentTurnIndex: number
@@ -82,9 +97,10 @@ export interface SerializedRoom {
   descriptionTime: number
   discussionTime: number
   descriptions: Description[]
-  votes?: Record<string, string> // Include votes in DISCUSSING phase
+  votes?: Record<string, string> // Include votes in DISCUSSING/VOTING phase
   wordPairId: string | null
   usedWordPairIds: string[]
+  lastGameResult?: GameResult | null
   createdAt: number
 }
 

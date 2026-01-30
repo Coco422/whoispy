@@ -11,6 +11,7 @@ interface DescriptionPhaseProps {
   currentTurnPlayerNickname: string | null
   currentPlayerId: string
   turnStartTime: number | null
+  timeLimit: number
   descriptions: Description[]
   players: Player[]
   onSubmitDescription: (text: string) => void
@@ -22,6 +23,7 @@ export function DescriptionPhase({
   currentTurnPlayerNickname,
   currentPlayerId,
   turnStartTime,
+  timeLimit,
   descriptions,
   players,
   onSubmitDescription,
@@ -48,7 +50,7 @@ export function DescriptionPhase({
       <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-6">
         {turnStartTime && (
           <div className="mb-4">
-            <Timer startTime={turnStartTime} duration={30} />
+            <Timer startTime={turnStartTime} duration={timeLimit} />
           </div>
         )}
 

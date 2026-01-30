@@ -1,6 +1,7 @@
 'use client'
 
 import { VoteResult, Player } from '@/types/game'
+import { ABSTAIN_VOTE_ID } from '@/lib/game/utils'
 
 interface VoteResultProps extends VoteResult {
   eliminatedNickname?: string
@@ -10,6 +11,20 @@ interface VoteResultProps extends VoteResult {
 export function VoteResultDisplay({ eliminatedPlayerId, voteCounts, isSpyEliminated, eliminatedNickname, players }: VoteResultProps) {
   // Create a map for quick player lookup
   const playerMap = new Map(players.map(p => [p.id, p]))
+  const abstainCount = voteCounts[ABSTAIN_VOTE_ID] || 0
+
+  const playerVoteEntries = Object.entries(voteCounts).filter(([id]) => id !== ABSTAIN_VOTE_ID && playerMap.has(id))
+  const maxPlayerVotes = playerVoteEntries.reduce((max, [, count]) => Math.max(max, count), 0)
+  const playersWithMaxVotes = playerVoteEntries.filter(([, count]) => count === maxPlayerVotes)
+
+  const noEliminationReason =
+    maxPlayerVotes === 0 && abstainCount > 0
+      ? 'all_abstain'
+      : abstainCount > 0 && abstainCount >= maxPlayerVotes
+      ? 'abstain_majority'
+      : playersWithMaxVotes.length > 1
+      ? 'tie'
+      : 'unknown'
 
   return (
     <div className="max-w-2xl mx-auto">
@@ -23,7 +38,7 @@ export function VoteResultDisplay({ eliminatedPlayerId, voteCounts, isSpyElimina
             .sort(([, a], [, b]) => b - a)
             .map(([playerId, count]) => {
               const player = playerMap.get(playerId)
-              const nickname = player?.nickname || '未知玩家'
+              const nickname = playerId === ABSTAIN_VOTE_ID ? '弃票' : player?.nickname || '未知玩家'
 
               return (
                 <div
@@ -53,8 +68,22 @@ export function VoteResultDisplay({ eliminatedPlayerId, voteCounts, isSpyElimina
           </div>
         ) : (
           <div className="bg-yellow-100 rounded-lg p-6 text-center">
-            <h3 className="text-xl font-bold text-yellow-900 mb-2">平票!</h3>
-            <p className="text-yellow-800">本回合无人被淘汰。</p>
+            <h3 className="text-xl font-bold text-yellow-900 mb-2">
+              {noEliminationReason === 'tie'
+                ? '平票!'
+                : noEliminationReason === 'abstain_majority' || noEliminationReason === 'all_abstain'
+                ? '弃票过多!'
+                : '无人淘汰!'}
+            </h3>
+            <p className="text-yellow-800">
+              {noEliminationReason === 'tie'
+                ? '本回合无人被淘汰。'
+                : noEliminationReason === 'all_abstain'
+                ? '全员弃票，本回合无人被淘汰。'
+                : noEliminationReason === 'abstain_majority'
+                ? '多数玩家选择弃票，本回合无人被淘汰。'
+                : '本回合无人被淘汰。'}
+            </p>
           </div>
         )}
       </div>

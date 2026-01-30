@@ -1,6 +1,7 @@
-import { Room, Player, PlayerRole, GamePhase, SerializedRoom } from '@/types/game'
-import { generateRoomCode } from '@/lib/game/utils'
-import { v4 as uuidv4 } from 'uuid'
+import { Room, Player, PlayerRole, GamePhase, SerializedRoom, Spectator } from '@/types/game'
+import { generateRoomCode, ABSTAIN_VOTE_ID } from '@/lib/game/utils'
+
+const MAX_PLAYERS = 8
 
 export class RoomManager {
   private rooms: Map<string, Room> = new Map()
@@ -13,7 +14,8 @@ export class RoomManager {
     hostNickname: string,
     hostSocketId: string,
     descriptionTime: number = 30,
-    discussionTime: number = 60
+    discussionTime: number = 60,
+    spectatorSeats: number = 5
   ): Room {
     let code = generateRoomCode()
 
@@ -38,9 +40,13 @@ export class RoomManager {
       code,
       hostId,
       players: new Map([[hostId, hostPlayer]]),
+      spectators: new Map(),
+      spectatorSeats: Math.max(0, Math.floor(spectatorSeats)),
+      spectatorQueue: [],
       phase: GamePhase.WAITING,
       currentRound: 0,
       currentTurnIndex: 0,
+      turnOrder: [],
       turnStartTime: null,
       descriptions: [],
       votes: new Map(),
@@ -50,6 +56,7 @@ export class RoomManager {
       descriptionTime, // 房主设置的发言时间
       discussionTime, // 房主设置的推理时间
       usedWordPairIds: [],
+      lastGameResult: null,
       createdAt: Date.now(),
       lastActivityAt: Date.now(),
     }
@@ -86,17 +93,22 @@ export class RoomManager {
       return { success: false, error: 'Room not found' }
     }
 
-    if (room.phase !== GamePhase.WAITING) {
+    if (room.phase !== GamePhase.WAITING && room.phase !== GamePhase.ENDED) {
       return { success: false, error: 'Game already started' }
     }
 
-    if (room.players.size >= 8) {
+    if (room.players.size >= MAX_PLAYERS) {
       return { success: false, error: 'Room is full (max 8 players)' }
     }
 
     // Check if nickname is already taken
     for (const player of room.players.values()) {
       if (player.nickname === nickname) {
+        return { success: false, error: 'Nickname already taken' }
+      }
+    }
+    for (const spectator of room.spectators.values()) {
+      if (spectator.nickname === nickname) {
         return { success: false, error: 'Nickname already taken' }
       }
     }
@@ -122,26 +134,97 @@ export class RoomManager {
   }
 
   /**
-   * Remove a player from a room
+   * Add a spectator to a room (allowed when game already started)
    */
-  removePlayer(code: string, playerId: string): { room?: Room; wasHost: boolean } {
+  addSpectator(
+    code: string,
+    spectatorId: string,
+    nickname: string,
+    socketId: string
+  ): { success: boolean; error?: string; room?: Room } {
     const room = this.rooms.get(code)
 
     if (!room) {
-      return { wasHost: false }
+      return { success: false, error: 'Room not found' }
     }
 
-    const player = room.players.get(playerId)
-    const wasHost = player?.isHost || false
+    if (room.phase === GamePhase.WAITING) {
+      return { success: false, error: 'Game not started yet' }
+    }
 
-    room.players.delete(playerId)
+    if (room.spectatorSeats <= 0) {
+      return { success: false, error: 'Spectator seats disabled' }
+    }
+
+    if (room.spectators.size >= room.spectatorSeats) {
+      return { success: false, error: 'Spectator seats are full' }
+    }
+
+    // Check if nickname is already taken
+    for (const player of room.players.values()) {
+      if (player.nickname === nickname) {
+        return { success: false, error: 'Nickname already taken' }
+      }
+    }
+    for (const spectator of room.spectators.values()) {
+      if (spectator.nickname === nickname) {
+        return { success: false, error: 'Nickname already taken' }
+      }
+    }
+
+    const spectator: Spectator = {
+      id: spectatorId,
+      nickname,
+      socketId,
+      joinedAt: Date.now(),
+    }
+
+    room.spectators.set(spectatorId, spectator)
+    room.spectatorQueue.push(spectatorId)
     room.lastActivityAt = Date.now()
 
-    // If no players left or game hasn't started, delete room
-    if (room.players.size === 0 || (room.phase === GamePhase.WAITING && room.players.size === 0)) {
+    console.log(`Spectator ${nickname} joined room ${code}`)
+
+    return { success: true, room }
+  }
+
+  /**
+   * Remove a player from a room
+   */
+  removeMember(code: string, memberId: string): { room?: Room; wasHost: boolean; wasSpectator: boolean } {
+    const room = this.rooms.get(code)
+
+    if (!room) {
+      return { wasHost: false, wasSpectator: false }
+    }
+
+    const player = room.players.get(memberId)
+    const spectator = room.spectators.get(memberId)
+    const wasSpectator = Boolean(spectator) && !player
+    const wasHost = player?.isHost || false
+
+    if (player) {
+      room.players.delete(memberId)
+      // Remove stale votes from and to this player to avoid incorrect tallies / blocking "all voted".
+      if (room.votes.size > 0) {
+        room.votes.delete(memberId)
+        for (const [voterId, targetId] of room.votes.entries()) {
+          if (targetId === memberId) {
+            room.votes.set(voterId, ABSTAIN_VOTE_ID)
+          }
+        }
+      }
+    } else if (spectator) {
+      room.spectators.delete(memberId)
+      room.spectatorQueue = room.spectatorQueue.filter((id) => id !== memberId)
+    }
+    room.lastActivityAt = Date.now()
+
+    // If no players left, delete room
+    if (room.players.size === 0) {
       this.rooms.delete(code)
       console.log(`Room ${code} deleted (no players)`)
-      return { wasHost }
+      return { wasHost, wasSpectator }
     }
 
     // If host left, assign new host
@@ -152,23 +235,77 @@ export class RoomManager {
       console.log(`New host assigned in room ${code}: ${newHost.nickname}`)
     }
 
-    return { room, wasHost }
+    return { room, wasHost, wasSpectator }
   }
 
   /**
    * Update player socket ID (for reconnection)
    */
-  updatePlayerSocketId(code: string, playerId: string, socketId: string): boolean {
+  updateMemberSocketId(code: string, memberId: string, socketId: string): { updated: boolean; kind?: 'player' | 'spectator' } {
     const room = this.rooms.get(code)
-    if (!room) return false
+    if (!room) return { updated: false }
 
-    const player = room.players.get(playerId)
-    if (!player) return false
+    const player = room.players.get(memberId)
+    if (player) {
+      player.socketId = socketId
+      room.lastActivityAt = Date.now()
+      return { updated: true, kind: 'player' }
+    }
 
-    player.socketId = socketId
-    room.lastActivityAt = Date.now()
+    const spectator = room.spectators.get(memberId)
+    if (spectator) {
+      spectator.socketId = socketId
+      room.lastActivityAt = Date.now()
+      return { updated: true, kind: 'spectator' }
+    }
 
-    return true
+    return { updated: false }
+  }
+
+  /**
+   * Promote spectators to players when slots are available (ENDED / WAITING)
+   */
+  promoteSpectators(room: Room): number {
+    if (room.spectators.size === 0) return 0
+    const availableSlots = MAX_PLAYERS - room.players.size
+    if (availableSlots <= 0) return 0
+
+    let promoted = 0
+
+    while (promoted < availableSlots && room.spectatorQueue.length > 0) {
+      const spectatorId = room.spectatorQueue.shift()
+      if (!spectatorId) break
+      const spectator = room.spectators.get(spectatorId)
+      if (!spectator) continue
+
+      room.spectators.delete(spectatorId)
+
+      const player: Player = {
+        id: spectator.id,
+        nickname: spectator.nickname,
+        role: null,
+        word: null,
+        isAlive: true,
+        isHost: false,
+        isReady: false,
+        socketId: spectator.socketId,
+        joinedAt: spectator.joinedAt,
+      }
+
+      room.players.set(player.id, player)
+      if (room.turnOrder.length > 0 && !room.turnOrder.includes(player.id)) {
+        room.turnOrder.push(player.id)
+      }
+
+      promoted++
+    }
+
+    if (promoted > 0) {
+      room.lastActivityAt = Date.now()
+      console.log(`Promoted ${promoted} spectators to players in room ${room.code}`)
+    }
+
+    return promoted
   }
 
   /**
@@ -208,10 +345,52 @@ export class RoomManager {
    * Serialize room for network transmission
    */
   serializeRoom(room: Room): SerializedRoom {
+    const players: Player[] = (() => {
+      const ordered: Player[] = []
+      const seen = new Set<string>()
+      const baseOrder = room.turnOrder.length > 0 ? room.turnOrder : Array.from(room.players.keys())
+
+      for (const playerId of baseOrder) {
+        const player = room.players.get(playerId)
+        if (!player) continue
+        ordered.push(player)
+        seen.add(playerId)
+      }
+
+      // Fallback: include any players that are not in baseOrder (should be rare)
+      for (const player of room.players.values()) {
+        if (seen.has(player.id)) continue
+        ordered.push(player)
+      }
+
+      return ordered
+    })()
+
+    const spectators: Spectator[] = (() => {
+      const ordered: Spectator[] = []
+      const seen = new Set<string>()
+
+      for (const spectatorId of room.spectatorQueue) {
+        const spectator = room.spectators.get(spectatorId)
+        if (!spectator) continue
+        ordered.push(spectator)
+        seen.add(spectatorId)
+      }
+
+      for (const spectator of room.spectators.values()) {
+        if (seen.has(spectator.id)) continue
+        ordered.push(spectator)
+      }
+
+      return ordered
+    })()
+
     return {
       code: room.code,
       hostId: room.hostId,
-      players: Array.from(room.players.values()),
+      players,
+      spectators,
+      spectatorSeats: room.spectatorSeats,
       phase: room.phase,
       currentRound: room.currentRound,
       currentTurnIndex: room.currentTurnIndex,
@@ -219,9 +398,10 @@ export class RoomManager {
       descriptions: room.descriptions,
       descriptionTime: room.descriptionTime,
       discussionTime: room.discussionTime,
-      votes: room.phase === GamePhase.DISCUSSING ? Object.fromEntries(room.votes) : undefined,
+      votes: room.phase === GamePhase.DISCUSSING || room.phase === GamePhase.VOTING ? Object.fromEntries(room.votes) : undefined,
       wordPairId: room.wordPairId,
       usedWordPairIds: room.usedWordPairIds,
+      lastGameResult: room.phase === GamePhase.ENDED ? room.lastGameResult : undefined,
       createdAt: room.createdAt,
     }
   }

@@ -25,6 +25,12 @@ export function generateRoomCode(): string {
 }
 
 /**
+ * Special targetId for "abstain" votes (弃票).
+ * This is not a real playerId and is safe alongside uuid player ids.
+ */
+export const ABSTAIN_VOTE_ID = '__abstain__'
+
+/**
  * Count votes and determine elimination
  * Returns the player ID with the most votes, or null if tie
  */
@@ -39,12 +45,15 @@ export function countVotes(votes: Map<string, string>): {
     voteCounts[targetId] = (voteCounts[targetId] || 0) + 1
   }
 
+  const abstainCount = voteCounts[ABSTAIN_VOTE_ID] || 0
+
   // Find player(s) with highest vote count
   let maxVotes = 0
   let eliminatedId: string | null = null
   const playersWithMaxVotes: string[] = []
 
   for (const [playerId, count] of Object.entries(voteCounts)) {
+    if (playerId === ABSTAIN_VOTE_ID) continue
     if (count > maxVotes) {
       maxVotes = count
       eliminatedId = playerId
@@ -57,6 +66,11 @@ export function countVotes(votes: Map<string, string>): {
 
   // If tie, no elimination (simplified rule)
   if (playersWithMaxVotes.length > 1) {
+    eliminatedId = null
+  }
+
+  // If abstain has at least as many votes as the top player, nobody is eliminated.
+  if (eliminatedId && abstainCount >= maxVotes) {
     eliminatedId = null
   }
 

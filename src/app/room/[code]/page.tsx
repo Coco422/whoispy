@@ -1,12 +1,13 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { connectSocket } from '@/lib/socket/client'
 import { useSocketEvent } from '@/lib/socket/hooks'
 import { useRoomStore } from '@/stores/room-store'
 import { useGameStore } from '@/stores/game-store'
 import { GamePhase, PlayerRole, SerializedRoom } from '@/types/game'
+import { VoteChatMessage } from '@/types/socket'
 import {
   clearStoredRoomSession,
   clearStoredRoomSessionIfMatches,
@@ -49,12 +50,19 @@ export default function RoomPage() {
   const [voteResult, setVoteResult] = useState<any>(null)
   const [showVoteResult, setShowVoteResult] = useState(false)
   const [roomNotFound, setRoomNotFound] = useState(false)
+  const [voteChatMessages, setVoteChatMessages] = useState<VoteChatMessage[]>([])
+  const lastRoundRef = useRef<number | null>(null)
 
   // If we previously stored a session for this room but it no longer exists, clear it.
   useEffect(() => {
     if (!roomNotFound) return
     clearStoredRoomSessionIfMatches(roomCode)
   }, [roomNotFound, roomCode])
+
+  useEffect(() => {
+    setVoteChatMessages([])
+    lastRoundRef.current = null
+  }, [roomCode])
 
   // Try to get room data on mount (and on reconnect)
   useEffect(() => {
@@ -107,6 +115,20 @@ export default function RoomPage() {
     setRoom(data)
     const nickname = playerId ? data.players.find((p) => p.id === playerId)?.nickname : undefined
     setStoredRoomSession({ roomCode: data.code, nickname })
+
+    // If user refreshes during ENDED phase, gameResult in zustand is lost. Re-hydrate from room state.
+    if (data.phase === GamePhase.ENDED) {
+      if (data.lastGameResult) {
+        setGameResult(data.lastGameResult)
+      }
+    } else {
+      setGameResult(null)
+    }
+
+    if (lastRoundRef.current !== null && data.currentRound !== lastRoundRef.current) {
+      setVoteChatMessages([])
+    }
+    lastRoundRef.current = data.currentRound
   })
 
   useSocketEvent('game_started', (data: { role: string; word: string }) => {
@@ -146,6 +168,10 @@ export default function RoomPage() {
     setGameResult(data)
   })
 
+  useSocketEvent<VoteChatMessage>('vote_message', (data) => {
+    setVoteChatMessages((prev) => [...prev.slice(-99), data])
+  })
+
   useSocketEvent('player_left', () => {
     // Handled by room_update
   })
@@ -172,6 +198,7 @@ export default function RoomPage() {
     const socket = connectSocket()
     socket.emit('leave_room', { roomCode })
     clearStoredRoomSession()
+    setVoteChatMessages([])
     resetRoom()
     resetGame()
     router.push('/')
@@ -199,6 +226,15 @@ export default function RoomPage() {
         alert(response.error || 'Failed to submit vote')
       } else {
         setIsSubmitting(false)
+      }
+    })
+  }
+
+  const handleSendVoteMessage = (text: string) => {
+    const socket = connectSocket()
+    socket.emit('send_vote_message', { roomCode, text }, (response) => {
+      if (!response.success) {
+        alert(response.error || 'Failed to send message')
       }
     })
   }
@@ -246,7 +282,18 @@ export default function RoomPage() {
   }
 
   const currentPlayer = room.players.find((p) => p.id === playerId)
-  const currentTurnPlayer = room.phase === GamePhase.DESCRIBING ? room.players[room.currentTurnIndex] : null
+  const isSpectator = !currentPlayer && room.spectators.some((s) => s.id === playerId)
+  const canVote = Boolean(currentPlayer && currentPlayer.isAlive)
+  const voteDisabledReason = isSpectator ? 'spectator' : currentPlayer && !currentPlayer.isAlive ? 'eliminated' : null
+  const canChat = Boolean(currentPlayer) // allow eliminated players to chat, spectators read-only
+  const alivePlayers = room.players.filter((p) => p.isAlive)
+  const turnIndex =
+    room.phase === GamePhase.DESCRIBING
+      ? room.currentRound % 2 === 0
+        ? alivePlayers.length - 1 - room.currentTurnIndex
+        : room.currentTurnIndex
+      : null
+  const currentTurnPlayer = turnIndex === null ? null : alivePlayers[turnIndex] || null
 
   return (
     <div className="min-h-screen p-4 py-8">
@@ -283,6 +330,8 @@ export default function RoomPage() {
           <WaitingRoom
             roomCode={roomCode}
             players={room.players}
+            spectators={room.spectators}
+            spectatorSeats={room.spectatorSeats}
             isHost={isHost()}
             currentPlayerId={playerId}
             onStartGame={handleStartGame}
@@ -299,6 +348,7 @@ export default function RoomPage() {
                 currentTurnPlayerNickname={currentTurnPlayer?.nickname || null}
                 currentPlayerId={playerId}
                 turnStartTime={room.turnStartTime}
+                timeLimit={room.descriptionTime}
                 descriptions={room.descriptions}
                 players={room.players}
                 onSubmitDescription={handleSubmitDescription}
@@ -308,6 +358,8 @@ export default function RoomPage() {
             <div>
               <PlayerList
                 players={room.players}
+                spectators={room.spectators}
+                spectatorSeats={room.spectatorSeats}
                 currentPlayerId={playerId}
                 showRoles={false}
               />
@@ -326,11 +378,16 @@ export default function RoomPage() {
                 currentPlayerId={playerId}
                 votes={room.votes}
                 onVote={handleSubmitVote}
+                chatMessages={voteChatMessages}
+                onSendChat={handleSendVoteMessage}
+                chatDisabled={!canChat}
               />
             </div>
             <div>
               <PlayerList
                 players={room.players}
+                spectators={room.spectators}
+                spectatorSeats={room.spectatorSeats}
                 currentPlayerId={playerId}
                 showRoles={false}
               />
@@ -348,11 +405,19 @@ export default function RoomPage() {
                 hasVoted={hasVoted}
                 onSubmitVote={handleSubmitVote}
                 isSubmitting={isSubmitting}
+                votes={room.votes}
+                chatMessages={voteChatMessages}
+                onSendChat={handleSendVoteMessage}
+                chatDisabled={!canChat}
+                canVote={canVote}
+                voteDisabledReason={voteDisabledReason}
               />
             </div>
             <div>
               <PlayerList
                 players={room.players}
+                spectators={room.spectators}
+                spectatorSeats={room.spectatorSeats}
                 currentPlayerId={playerId}
                 showRoles={false}
               />
@@ -369,9 +434,18 @@ export default function RoomPage() {
             result={gameResult}
             players={room.players}
             currentPlayerId={playerId}
+            isSpectator={isSpectator}
             onToggleReady={handleToggleReady}
             onRestartGame={handleRestartGame}
           />
+        )}
+
+        {room.phase === GamePhase.ENDED && !gameResult && (
+          <div className="max-w-2xl mx-auto bg-white rounded-xl shadow-lg border border-gray-200 p-6 text-center">
+            <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-primary-600 mx-auto mb-4"></div>
+            <p className="text-gray-700 font-semibold">游戏已结束，加载结算中...</p>
+            <p className="text-sm text-gray-500 mt-2">如果一直卡住，尝试返回首页重新进入。</p>
+          </div>
         )}
       </div>
     </div>

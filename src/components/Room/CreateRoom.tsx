@@ -7,7 +7,7 @@ import { Card } from '../ui/Card'
 import { generateRandomNickname } from '@/lib/game/nickname-generator'
 
 interface CreateRoomProps {
-  onCreateRoom: (nickname: string, descriptionTime: number, discussionTime: number) => void
+  onCreateRoom: (nickname: string, descriptionTime: number, discussionTime: number, spectatorSeats: number) => void
   isLoading?: boolean
   error?: string
 }
@@ -16,6 +16,7 @@ export function CreateRoom({ onCreateRoom, isLoading, error }: CreateRoomProps) 
   const [nickname, setNickname] = useState('')
   const [descriptionTime, setDescriptionTime] = useState(30)
   const [discussionTime, setDiscussionTime] = useState(60)
+  const [spectatorSeats, setSpectatorSeats] = useState(5)
 
   // 初始化时生成随机昵称
   useEffect(() => {
@@ -25,7 +26,7 @@ export function CreateRoom({ onCreateRoom, isLoading, error }: CreateRoomProps) 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     if (nickname.trim()) {
-      onCreateRoom(nickname.trim(), descriptionTime, discussionTime)
+      onCreateRoom(nickname.trim(), descriptionTime, discussionTime, spectatorSeats)
     }
   }
 
@@ -102,6 +103,32 @@ export function CreateRoom({ onCreateRoom, isLoading, error }: CreateRoomProps) 
               </button>
             ))}
           </div>
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium text-foreground mb-2">
+            观战席席位
+          </label>
+          <div className="flex gap-2">
+            {[0, 3, 5, 8, 10].map((count) => (
+              <button
+                key={count}
+                type="button"
+                onClick={() => setSpectatorSeats(count)}
+                disabled={isLoading}
+                className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  spectatorSeats === count
+                    ? 'bg-primary-600 text-white'
+                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                }`}
+              >
+                {count}
+              </button>
+            ))}
+          </div>
+          <p className="text-xs text-gray-500 mt-2">
+            游戏开始后加入的玩家将进入观战席（默认 5）。
+          </p>
         </div>
 
         <Button

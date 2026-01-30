@@ -3,9 +3,9 @@ import { Server as HTTPServer } from 'http'
 import { ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData } from '@/types/socket'
 import { roomManager } from './room-manager'
 import { gameManager } from './game-manager'
-import { validateNickname, validateRoomCode } from '@/lib/game/utils'
+import { validateNickname, validateRoomCode, ABSTAIN_VOTE_ID } from '@/lib/game/utils'
 import { v4 as uuidv4 } from 'uuid'
-import { GamePhase } from '@/types/game'
+import { Description, GamePhase, Room } from '@/types/game'
 
 export function initializeSocketServer(httpServer: HTTPServer) {
   const io = new SocketIOServer<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>(
@@ -20,10 +20,156 @@ export function initializeSocketServer(httpServer: HTTPServer) {
 
   // Track disconnected players with timeout to allow reconnection
   const disconnectTimeouts = new Map<string, NodeJS.Timeout>()
+  const descriptionTimeouts = new Map<string, NodeJS.Timeout>()
   const reconnectGraceMs = (() => {
     const raw = Number(process.env.PLAYER_RECONNECT_GRACE_MS)
     return Number.isFinite(raw) && raw >= 0 ? raw : 30_000
   })()
+
+  const clearDescriptionTimeout = (roomCode: string) => {
+    const timeoutId = descriptionTimeouts.get(roomCode)
+    if (timeoutId) {
+      clearTimeout(timeoutId)
+      descriptionTimeouts.delete(roomCode)
+    }
+  }
+
+  const scheduleDiscussionToVoting = (roomCode: string, room: Room) => {
+    setTimeout(() => {
+      const latestRoom = roomManager.getRoom(roomCode)
+      if (!latestRoom) return
+      // Only start voting if we're still in the discussion phase (players may have voted early / game advanced).
+      if (latestRoom.phase !== GamePhase.DISCUSSING) return
+
+      gameManager.startVoting(latestRoom)
+      const updatedSerialized = roomManager.serializeRoom(latestRoom)
+      io.to(roomCode).emit('room_update', updatedSerialized)
+      const votingTimeLimit = 15
+      io.to(roomCode).emit('start_voting', {
+        timeLimit: votingTimeLimit,
+        startTime: latestRoom.turnStartTime!,
+      })
+
+      // Voting timeout: anyone who didn't vote defaults to abstain, then settle.
+      setTimeout(() => {
+        const latestRoom = roomManager.getRoom(roomCode)
+        if (!latestRoom) return
+        if (latestRoom.phase !== GamePhase.VOTING) return
+
+        const alivePlayers = Array.from(latestRoom.players.values()).filter((p) => p.isAlive)
+        for (const player of alivePlayers) {
+          if (!latestRoom.votes.has(player.id)) {
+            latestRoom.votes.set(player.id, ABSTAIN_VOTE_ID)
+          }
+        }
+
+        processVotingResults(io, latestRoom)
+      }, votingTimeLimit * 1000)
+    }, room.discussionTime * 1000)
+  }
+
+  const beginDiscussingPhase = (roomCode: string, room: Room) => {
+    clearDescriptionTimeout(roomCode)
+    io.to(roomCode).emit('start_discussing', {
+      timeLimit: room.discussionTime,
+      startTime: room.turnStartTime!,
+    })
+    scheduleDiscussionToVoting(roomCode, room)
+  }
+
+  const scheduleDescriptionTimeout = (
+    roomCode: string,
+    expectedStartTime: number,
+    expectedPlayerId: string,
+    timeLimitSeconds: number
+  ) => {
+    clearDescriptionTimeout(roomCode)
+
+    const timeoutId = setTimeout(() => {
+      // Ensure we don't keep a stale timeout around if it fires.
+      descriptionTimeouts.delete(roomCode)
+
+      const room = roomManager.getRoom(roomCode)
+      if (!room) return
+      const phase = room.phase
+      if (phase !== GamePhase.DESCRIBING) return
+      if (!room.turnStartTime || room.turnStartTime !== expectedStartTime) return
+
+      const currentPlayer = gameManager.getCurrentTurnPlayer(room)
+      if (!currentPlayer) {
+        // If the turn is invalid (e.g. players left), advance to avoid getting stuck.
+        gameManager.advanceTurn(room)
+        const serialized = roomManager.serializeRoom(room)
+        io.to(roomCode).emit('room_update', serialized)
+
+        if (room.phase === GamePhase.DISCUSSING) {
+          beginDiscussingPhase(roomCode, room)
+          return
+        }
+
+        startCurrentTurn(roomCode, room)
+        return
+      }
+
+      if (currentPlayer.id !== expectedPlayerId) return
+
+      const timeoutDescription: Description = {
+        playerId: currentPlayer.id,
+        nickname: currentPlayer.nickname,
+        text: '',
+        round: room.currentRound,
+        timestamp: Date.now(),
+      }
+
+      room.descriptions.push(timeoutDescription)
+      room.lastActivityAt = Date.now()
+
+      io.to(roomCode).emit('description_timeout', {
+        playerId: currentPlayer.id,
+        nickname: currentPlayer.nickname,
+      })
+      io.to(roomCode).emit('new_description', timeoutDescription)
+
+      const hasNextTurn = gameManager.advanceTurn(room)
+
+      const serialized = roomManager.serializeRoom(room)
+      io.to(roomCode).emit('room_update', serialized)
+
+      if (room.phase === GamePhase.DISCUSSING) {
+        beginDiscussingPhase(roomCode, room)
+        return
+      }
+
+      if (hasNextTurn) {
+        startCurrentTurn(roomCode, room)
+      }
+    }, Math.max(0, timeLimitSeconds) * 1000)
+
+    descriptionTimeouts.set(roomCode, timeoutId)
+  }
+
+  const startCurrentTurn = (roomCode: string, room: Room) => {
+    const currentPlayer = gameManager.getCurrentTurnPlayer(room)
+    if (!currentPlayer) {
+      // If we can't determine a valid next speaker, avoid deadlock by moving to discussion.
+      if (room.phase === GamePhase.DESCRIBING) {
+        room.phase = GamePhase.DISCUSSING
+        room.turnStartTime = Date.now()
+        const serialized = roomManager.serializeRoom(room)
+        io.to(roomCode).emit('room_update', serialized)
+        beginDiscussingPhase(roomCode, room)
+      }
+      return
+    }
+
+    io.to(roomCode).emit('start_turn', {
+      playerId: currentPlayer.id,
+      nickname: currentPlayer.nickname,
+      timeLimit: room.descriptionTime,
+      startTime: room.turnStartTime!,
+    })
+    scheduleDescriptionTimeout(roomCode, room.turnStartTime!, currentPlayer.id, room.descriptionTime)
+  }
 
   // Clean up inactive rooms every 30 minutes
   setInterval(() => {
@@ -39,7 +185,7 @@ export function initializeSocketServer(httpServer: HTTPServer) {
     const playerId = clientPlayerId || uuidv4()
     socket.data.playerId = playerId
 
-    // Cancel any pending disconnect timeout for this player
+    // Cancel any pending disconnect timeout for this member
     const pendingTimeout = disconnectTimeouts.get(playerId)
     if (pendingTimeout) {
       clearTimeout(pendingTimeout)
@@ -48,8 +194,8 @@ export function initializeSocketServer(httpServer: HTTPServer) {
 
       // Find which room this player belongs to and update their socketId
       for (const code of roomManager.getRoomCodes()) {
-        const updated = roomManager.updatePlayerSocketId(code, playerId, socket.id)
-        if (updated) {
+        const updated = roomManager.updateMemberSocketId(code, playerId, socket.id)
+        if (updated.updated) {
           socket.data.roomCode = code
           socket.join(code)
           // Send current room state to reconnected client
@@ -58,10 +204,29 @@ export function initializeSocketServer(httpServer: HTTPServer) {
             const serialized = roomManager.serializeRoom(room)
             socket.emit('room_update', serialized)
 
-            // If game is in progress, resend role/word
+            // If game is in progress, resend role/word (players only).
+            // Do not resend in ENDED/WAITING to avoid popping "身份牌" on refresh in lobby/result state.
             const player = room.players.get(playerId)
-            if (player && player.role && player.word) {
+            if (
+              player &&
+              player.role &&
+              player.word &&
+              room.phase !== GamePhase.WAITING &&
+              room.phase !== GamePhase.ENDED
+            ) {
               socket.emit('game_started', { role: player.role, word: player.word })
+            }
+
+            // If game already ended, resend final result so refreshed clients can render the "准备"页面.
+            if (room.phase === GamePhase.ENDED && room.lastGameResult) {
+              socket.emit('game_over', room.lastGameResult)
+            }
+
+            const spectator = room.spectators.get(playerId)
+            if (spectator) {
+              socket.data.nickname = spectator.nickname
+            } else if (player) {
+              socket.data.nickname = player.nickname
             }
           }
           console.log(`Player ${playerId} reconnected to room ${code}`)
@@ -75,7 +240,7 @@ export function initializeSocketServer(httpServer: HTTPServer) {
     socket.emit('connected', { playerId })
 
     // CREATE ROOM
-    socket.on('create_room', ({ nickname, descriptionTime, discussionTime }, callback) => {
+    socket.on('create_room', ({ nickname, descriptionTime, discussionTime, spectatorSeats }, callback) => {
       try {
         const validation = validateNickname(nickname)
         if (!validation.valid) {
@@ -88,7 +253,8 @@ export function initializeSocketServer(httpServer: HTTPServer) {
           nickname.trim(),
           socket.id,
           descriptionTime || 30,
-          discussionTime || 60
+          discussionTime || 60,
+          spectatorSeats ?? 5
         )
         socket.data.roomCode = room.code
         socket.data.nickname = nickname.trim()
@@ -120,7 +286,37 @@ export function initializeSocketServer(httpServer: HTTPServer) {
           return
         }
 
-        const result = roomManager.addPlayer(roomCode, playerId, nickname.trim(), socket.id)
+        const room = roomManager.getRoom(roomCode)
+        if (!room) {
+          callback({ success: false, error: 'Room not found' })
+          return
+        }
+
+        const trimmedNickname = nickname.trim()
+
+        // If this playerId is already in the room (player or spectator), treat as a re-join.
+        const existingPlayer = room.players.get(playerId)
+        const existingSpectator = room.spectators.get(playerId)
+        if (existingPlayer || existingSpectator) {
+          roomManager.updateMemberSocketId(roomCode, playerId, socket.id)
+          socket.data.roomCode = roomCode
+          socket.data.nickname = existingPlayer?.nickname || existingSpectator?.nickname
+          socket.join(roomCode)
+
+          const serialized = roomManager.serializeRoom(room)
+          io.to(roomCode).emit('room_update', serialized)
+
+          callback({ success: true, mode: existingPlayer ? 'player' : 'spectator' })
+          return
+        }
+
+        const shouldJoinAsPlayer =
+          room.phase === GamePhase.WAITING ||
+          (room.phase === GamePhase.ENDED && room.players.size < 8)
+
+        const result = shouldJoinAsPlayer
+          ? roomManager.addPlayer(roomCode, playerId, trimmedNickname, socket.id)
+          : roomManager.addSpectator(roomCode, playerId, trimmedNickname, socket.id)
 
         if (!result.success) {
           callback({ success: false, error: result.error })
@@ -128,7 +324,7 @@ export function initializeSocketServer(httpServer: HTTPServer) {
         }
 
         socket.data.roomCode = roomCode
-        socket.data.nickname = nickname.trim()
+        socket.data.nickname = trimmedNickname
 
         socket.join(roomCode)
 
@@ -138,9 +334,11 @@ export function initializeSocketServer(httpServer: HTTPServer) {
         const player = result.room!.players.get(playerId)
         if (player) {
           socket.to(roomCode).emit('player_joined', { player })
+          callback({ success: true, mode: 'player' })
+          return
         }
 
-        callback({ success: true })
+        callback({ success: true, mode: 'spectator' })
       } catch (error) {
         console.error('Error joining room:', error)
         callback({ success: false, error: 'Failed to join room' })
@@ -157,23 +355,34 @@ export function initializeSocketServer(httpServer: HTTPServer) {
         }
 
         const player = room.players.get(playerId)
-        if (!player) {
+        const spectator = room.spectators.get(playerId)
+        if (!player && !spectator) {
           callback({ success: false, error: 'Not in this room' })
           return
         }
 
         // Update socket ID and join socket room
-        roomManager.updatePlayerSocketId(roomCode, playerId, socket.id)
+        roomManager.updateMemberSocketId(roomCode, playerId, socket.id)
         socket.data.roomCode = roomCode
-        socket.data.nickname = player.nickname
+        socket.data.nickname = player?.nickname || spectator?.nickname
         socket.join(roomCode)
 
         const serialized = roomManager.serializeRoom(room)
         socket.emit('room_update', serialized)
 
-        // Resend role/word if game in progress
-        if (player.role && player.word) {
+        // Resend role/word if game in progress (players only).
+        if (
+          player &&
+          player.role &&
+          player.word &&
+          room.phase !== GamePhase.WAITING &&
+          room.phase !== GamePhase.ENDED
+        ) {
           socket.emit('game_started', { role: player.role, word: player.word })
+        }
+
+        if (room.phase === GamePhase.ENDED && room.lastGameResult) {
+          socket.emit('game_over', room.lastGameResult)
         }
 
         callback({ success: true })
@@ -186,14 +395,22 @@ export function initializeSocketServer(httpServer: HTTPServer) {
     // LEAVE ROOM
     socket.on('leave_room', ({ roomCode }) => {
       try {
-        const { room, wasHost } = roomManager.removePlayer(roomCode, playerId)
+        const { room, wasSpectator } = roomManager.removeMember(roomCode, playerId)
 
         socket.leave(roomCode)
         socket.data.roomCode = undefined
 
-        if (room) {
-          const serialized = roomManager.serializeRoom(room)
-          io.to(roomCode).emit('room_update', serialized)
+        if (!room) {
+          clearDescriptionTimeout(roomCode)
+          return
+        }
+
+        if (!wasSpectator && (room.phase === GamePhase.WAITING || room.phase === GamePhase.ENDED)) {
+          roomManager.promoteSpectators(room)
+        }
+        const serialized = roomManager.serializeRoom(room)
+        io.to(roomCode).emit('room_update', serialized)
+        if (!wasSpectator) {
           io.to(roomCode).emit('player_left', { playerId, nickname: socket.data.nickname || 'Unknown' })
         }
       } catch (error) {
@@ -236,16 +453,8 @@ export function initializeSocketServer(httpServer: HTTPServer) {
         const serialized = roomManager.serializeRoom(room)
         io.to(roomCode).emit('room_update', serialized)
 
-        // Start first turn
-        const currentPlayer = gameManager.getCurrentTurnPlayer(room)
-        if (currentPlayer) {
-          io.to(roomCode).emit('start_turn', {
-            playerId: currentPlayer.id,
-            nickname: currentPlayer.nickname,
-            timeLimit: room.descriptionTime,
-            startTime: room.turnStartTime!,
-          })
-        }
+        // Start first turn (and schedule timeout)
+        startCurrentTurn(roomCode, room)
 
         callback({ success: true })
       } catch (error) {
@@ -264,6 +473,9 @@ export function initializeSocketServer(httpServer: HTTPServer) {
           return
         }
 
+        // A valid description submission should cancel the turn timeout.
+        clearDescriptionTimeout(roomCode)
+
         const result = gameManager.submitDescription(room, playerId, text)
 
         if (!result.success) {
@@ -281,37 +493,10 @@ export function initializeSocketServer(httpServer: HTTPServer) {
 
         if (result.nextTurn) {
           // Start next player's turn
-          const currentPlayer = gameManager.getCurrentTurnPlayer(room)
-          if (currentPlayer) {
-            io.to(roomCode).emit('start_turn', {
-              playerId: currentPlayer.id,
-              nickname: currentPlayer.nickname,
-              timeLimit: room.descriptionTime,
-              startTime: room.turnStartTime!,
-            })
-          }
+          startCurrentTurn(roomCode, room)
         } else {
           // Move to discussing phase
-          io.to(roomCode).emit('start_discussing', {
-            timeLimit: room.discussionTime,
-            startTime: room.turnStartTime!,
-          })
-
-          // Auto transition to results if all voted, or to voting after discussion time
-          setTimeout(() => {
-            // Skip if already moved to results (all voted early)
-            if (room.phase === GamePhase.RESULT) {
-              return
-            }
-
-            gameManager.startVoting(room)
-            const updatedSerialized = roomManager.serializeRoom(room)
-            io.to(roomCode).emit('room_update', updatedSerialized)
-            io.to(roomCode).emit('start_voting', {
-              timeLimit: 15,
-              startTime: room.turnStartTime!,
-            })
-          }, room.discussionTime * 1000)
+          beginDiscussingPhase(roomCode, room)
         }
 
         callback({ success: true })
@@ -343,6 +528,8 @@ export function initializeSocketServer(httpServer: HTTPServer) {
           const serialized = roomManager.serializeRoom(room)
           io.to(roomCode).emit('room_update', serialized)
         } else {
+          const serialized = roomManager.serializeRoom(room)
+          io.to(roomCode).emit('room_update', serialized)
           io.to(roomCode).emit('vote_submitted', { voterId: playerId })
         }
 
@@ -363,6 +550,52 @@ export function initializeSocketServer(httpServer: HTTPServer) {
       } catch (error) {
         console.error('Error submitting vote:', error)
         callback({ success: false, error: 'Failed to submit vote' })
+      }
+    })
+
+    // VOTE CHAT (allowed during discussing/voting)
+    socket.on('send_vote_message', ({ roomCode, text }, callback) => {
+      try {
+        const room = roomManager.getRoom(roomCode)
+        if (!room) {
+          callback({ success: false, error: 'Room not found' })
+          return
+        }
+
+        const player = room.players.get(playerId)
+        if (!player) {
+          callback({ success: false, error: 'Not in this room' })
+          return
+        }
+
+        if (room.phase !== GamePhase.DISCUSSING && room.phase !== GamePhase.VOTING) {
+          callback({ success: false, error: 'Chat is only available during voting' })
+          return
+        }
+
+        const message = (text || '').trim()
+        if (!message) {
+          callback({ success: false, error: 'Message cannot be empty' })
+          return
+        }
+        if (message.length > 200) {
+          callback({ success: false, error: 'Message too long (max 200 characters)' })
+          return
+        }
+
+        const payload = {
+          id: uuidv4(),
+          playerId,
+          nickname: player.nickname,
+          text: message,
+          timestamp: Date.now(),
+        }
+
+        io.to(roomCode).emit('vote_message', payload)
+        callback({ success: true })
+      } catch (error) {
+        console.error('Error sending vote message:', error)
+        callback({ success: false, error: 'Failed to send message' })
       }
     })
 
@@ -434,26 +667,34 @@ export function initializeSocketServer(httpServer: HTTPServer) {
     })
 
     // DISCONNECT
-    socket.on('disconnect', () => {
-      console.log(`Socket disconnected: ${socket.id}, Player ID: ${playerId}`)
+	    socket.on('disconnect', () => {
+	      console.log(`Socket disconnected: ${socket.id}, Player ID: ${playerId}`)
 
-      const roomCode = socket.data.roomCode
-      if (roomCode) {
-        // Don't remove player immediately - give them time to refresh/reconnect
-        const timeoutId = setTimeout(() => {
-          const { room, wasHost } = roomManager.removePlayer(roomCode, playerId)
+	      const roomCode = socket.data.roomCode
+	      if (roomCode) {
+	        // Don't remove player immediately - give them time to refresh/reconnect
+	        const timeoutId = setTimeout(() => {
+	          const { room, wasSpectator } = roomManager.removeMember(roomCode, playerId)
 
-          if (room) {
-            const serialized = roomManager.serializeRoom(room)
-            io.to(roomCode).emit('room_update', serialized)
-            io.to(roomCode).emit('player_left', { playerId, nickname: socket.data.nickname || 'Unknown' })
-            console.log(`Player ${playerId} removed from room ${roomCode} after disconnect timeout`)
-          } else {
-            console.log(`Room ${roomCode} deleted after player ${playerId} removed`)
-          }
+	          if (room) {
+	            if (!wasSpectator && (room.phase === GamePhase.WAITING || room.phase === GamePhase.ENDED)) {
+	              roomManager.promoteSpectators(room)
+	            }
+	            const serialized = roomManager.serializeRoom(room)
+	            io.to(roomCode).emit('room_update', serialized)
+	            if (!wasSpectator) {
+	              io.to(roomCode).emit('player_left', { playerId, nickname: socket.data.nickname || 'Unknown' })
+	              console.log(`Player ${playerId} removed from room ${roomCode} after disconnect timeout`)
+	            } else {
+	              console.log(`Spectator ${playerId} removed from room ${roomCode} after disconnect timeout`)
+	            }
+	          } else {
+              clearDescriptionTimeout(roomCode)
+	            console.log(`Room ${roomCode} deleted after player ${playerId} removed`)
+	          }
 
-          disconnectTimeouts.delete(playerId)
-        }, reconnectGraceMs)
+	          disconnectTimeouts.delete(playerId)
+	        }, reconnectGraceMs)
 
         disconnectTimeouts.set(playerId, timeoutId)
       }
@@ -479,16 +720,19 @@ export function initializeSocketServer(httpServer: HTTPServer) {
     // Check win condition
     const gameResult = gameManager.checkWinCondition(room)
 
-    if (gameResult) {
-      // Game over
-      setTimeout(() => {
-        gameManager.endGame(room, gameResult)
-        io.to(room.code).emit('game_over', gameResult)
+	    if (gameResult) {
+	      // Game over
+	      setTimeout(() => {
+	        gameManager.endGame(room, gameResult)
+	        io.to(room.code).emit('game_over', gameResult)
 
-        const serialized = roomManager.serializeRoom(room)
-        io.to(room.code).emit('room_update', serialized)
-      }, 3000) // Delay to show vote result first
-    } else {
+	        // After game ends, try to promote spectators into player slots (FIFO) if available.
+	        roomManager.promoteSpectators(room)
+
+	        const serialized = roomManager.serializeRoom(room)
+	        io.to(room.code).emit('room_update', serialized)
+	      }, 3000) // Delay to show vote result first
+	    } else {
       // Continue to next round
       setTimeout(() => {
         gameManager.startNextRound(room)
@@ -497,15 +741,7 @@ export function initializeSocketServer(httpServer: HTTPServer) {
         io.to(room.code).emit('room_update', serialized)
 
         // Start first turn of new round
-        const currentPlayer = gameManager.getCurrentTurnPlayer(room)
-        if (currentPlayer) {
-          io.to(room.code).emit('start_turn', {
-            playerId: currentPlayer.id,
-            nickname: currentPlayer.nickname,
-            timeLimit: room.descriptionTime,
-            startTime: room.turnStartTime!,
-          })
-        }
+        startCurrentTurn(room.code, room)
       }, 3000)
     }
   }

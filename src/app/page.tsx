@@ -47,13 +47,13 @@ export default function HomePage() {
     setIsLoading(false)
   })
 
-  const handleCreateRoom = (nickname: string, descriptionTime: number, discussionTime: number) => {
+  const handleCreateRoom = (nickname: string, descriptionTime: number, discussionTime: number, spectatorSeats: number) => {
     setIsLoading(true)
     setError('')
 
     const socket = connectSocket()
 
-    socket.emit('create_room', { nickname, descriptionTime, discussionTime }, (response) => {
+    socket.emit('create_room', { nickname, descriptionTime, discussionTime, spectatorSeats }, (response) => {
       if (response.success && response.roomCode) {
         setStoredRoomSession({ roomCode: response.roomCode, nickname })
         setResumeSession(getStoredRoomSession())

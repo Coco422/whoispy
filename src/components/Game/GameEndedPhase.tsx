@@ -7,6 +7,7 @@ interface GameEndedPhaseProps {
   result: GameResult
   players: Player[]
   currentPlayerId: string
+  isSpectator?: boolean
   onToggleReady: () => void
   onRestartGame: () => void
 }
@@ -15,6 +16,7 @@ export function GameEndedPhase({
   result,
   players,
   currentPlayerId,
+  isSpectator = false,
   onToggleReady,
   onRestartGame,
 }: GameEndedPhaseProps) {
@@ -99,6 +101,7 @@ export function GameEndedPhase({
               onClick={onToggleReady}
               variant={currentPlayer?.isReady ? 'secondary' : 'primary'}
               size="lg"
+              disabled={isSpectator || !currentPlayer}
             >
               {currentPlayer?.isReady ? '取消准备' : '准备'}
             </Button>
@@ -118,6 +121,12 @@ export function GameEndedPhase({
           {isHost && !allReady && (
             <p className="text-sm text-gray-500 mt-2">
               等待所有玩家准备后才能开始下一局
+            </p>
+          )}
+
+          {isSpectator && (
+            <p className="text-sm text-gray-500 mt-2">
+              你在观战席，等待空位加入下一局（有人离开后将按加入顺序自动补位）。
             </p>
           )}
         </div>

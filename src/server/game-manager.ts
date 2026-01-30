@@ -1,8 +1,37 @@
 import { Room, Player, PlayerRole, GamePhase, Description, VoteResult, GameResult } from '@/types/game'
-import { shuffle, randomItem, countVotes, getAlivePlayers, isSpy } from '@/lib/game/utils'
+import { shuffle, randomItem, countVotes, getAlivePlayers, isSpy, ABSTAIN_VOTE_ID } from '@/lib/game/utils'
 import { getWordPairStore } from '@/lib/db/word-store'
 
 export class GameManager {
+  private getAlivePlayersInTurnOrder(room: Room): Player[] {
+    const order = room.turnOrder.length > 0 ? room.turnOrder : Array.from(room.players.keys())
+    const alivePlayers: Player[] = []
+    const seen = new Set<string>()
+
+    for (const playerId of order) {
+      const player = room.players.get(playerId)
+      if (!player || !player.isAlive) continue
+      alivePlayers.push(player)
+      seen.add(playerId)
+    }
+
+    // Fallback: include any alive players not in order (should be rare)
+    for (const player of room.players.values()) {
+      if (!player.isAlive || seen.has(player.id)) continue
+      alivePlayers.push(player)
+    }
+
+    return alivePlayers
+  }
+
+  private getTurnIndex(room: Room, aliveCount: number): number | null {
+    if (aliveCount <= 0) return null
+    if (room.currentTurnIndex < 0 || room.currentTurnIndex >= aliveCount) return null
+
+    const isReverse = room.currentRound % 2 === 0
+    return isReverse ? aliveCount - 1 - room.currentTurnIndex : room.currentTurnIndex
+  }
+
   /**
    * Start a game in a room
    */
@@ -61,6 +90,7 @@ export class GameManager {
     // Assign roles: 1 spy, rest civilians
     const playerIds = Array.from(room.players.keys())
     const shuffledIds = shuffle(playerIds)
+    room.turnOrder = shuffle(playerIds)
 
     const spyId = shuffledIds[0]
     const civilianIds = shuffledIds.slice(1)
@@ -99,13 +129,10 @@ export class GameManager {
       return null
     }
 
-    const alivePlayers = getAlivePlayers(room.players)
+    const alivePlayers = this.getAlivePlayersInTurnOrder(room)
 
-    if (alivePlayers.length === 0 || room.currentTurnIndex >= alivePlayers.length) {
-      return null
-    }
-
-    return alivePlayers[room.currentTurnIndex]
+    const index = this.getTurnIndex(room, alivePlayers.length)
+    return index === null ? null : alivePlayers[index]
   }
 
   /**
@@ -165,7 +192,7 @@ export class GameManager {
       return false
     }
 
-    const alivePlayers = getAlivePlayers(room.players)
+    const alivePlayers = this.getAlivePlayersInTurnOrder(room)
     room.currentTurnIndex++
 
     // If all players have described, move to discussing phase
@@ -212,13 +239,15 @@ export class GameManager {
       return { success: false, error: 'Voter not found or not alive' }
     }
 
-    const target = room.players.get(targetId)
-    if (!target || !target.isAlive) {
-      return { success: false, error: 'Target not found or not alive' }
-    }
+    if (targetId !== ABSTAIN_VOTE_ID) {
+      const target = room.players.get(targetId)
+      if (!target || !target.isAlive) {
+        return { success: false, error: 'Target not found or not alive' }
+      }
 
-    if (voterId === targetId) {
-      return { success: false, error: 'Cannot vote for yourself' }
+      if (voterId === targetId) {
+        return { success: false, error: 'Cannot vote for yourself' }
+      }
     }
 
     // Record vote
@@ -299,8 +328,9 @@ export class GameManager {
       }
     }
 
-    // Check if 3 players remain and spy is alive - spy wins
-    if (alivePlayers.length <= 3) {
+    // Spy wins when they reach parity (i.e. only 1 civilian left with 1 spy).
+    // With a single spy, that means 2 players remaining.
+    if (alivePlayers.length <= 2) {
       return {
         winner: 'spy',
         spyId: spyPlayer.id,
@@ -334,6 +364,7 @@ export class GameManager {
    */
   endGame(room: Room, result: GameResult): void {
     room.phase = GamePhase.ENDED
+    room.lastGameResult = result
     room.lastActivityAt = Date.now()
 
     // Reset all players' ready status
@@ -373,12 +404,14 @@ export class GameManager {
     room.phase = GamePhase.WAITING
     room.currentRound = 0
     room.currentTurnIndex = 0
+    room.turnOrder = []
     room.turnStartTime = null
     room.descriptions = []
     room.votes.clear()
     room.wordPairId = null
     room.wordA = null
     room.wordB = null
+    room.lastGameResult = null
     // DON'T reset usedWordPairIds - keep history across games in same room
     room.lastActivityAt = Date.now()
 

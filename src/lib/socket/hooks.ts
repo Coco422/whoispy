@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef } from 'react'
 import { getSocket } from './client'
 
 export function useSocketEvent<T = any>(
@@ -13,7 +13,9 @@ export function useSocketEvent<T = any>(
     callbackRef.current = callback
   }, [callback])
 
-  useEffect(() => {
+  // Attach listeners before effects that trigger socket.connect() run,
+  // so we don't miss early events like the initial room_update on refresh/reconnect.
+  useLayoutEffect(() => {
     const socket = getSocket()
 
     const handler = (data: T) => {

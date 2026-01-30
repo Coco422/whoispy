@@ -1,14 +1,22 @@
 'use client'
 
-import { Player } from '@/types/game'
+import { Player, Spectator } from '@/types/game'
 
 interface PlayerListProps {
   players: Player[]
   currentPlayerId: string
   showRoles?: boolean
+  spectators?: Spectator[]
+  spectatorSeats?: number
 }
 
-export function PlayerList({ players, currentPlayerId, showRoles = false }: PlayerListProps) {
+export function PlayerList({
+  players,
+  currentPlayerId,
+  showRoles = false,
+  spectators = [],
+  spectatorSeats = 0,
+}: PlayerListProps) {
   const alivePlayers = players.filter(p => p.isAlive)
   const eliminatedPlayers = players.filter(p => !p.isAlive)
 
@@ -96,6 +104,49 @@ export function PlayerList({ players, currentPlayerId, showRoles = false }: Play
               </div>
             ))}
           </div>
+        </>
+      )}
+
+      {(spectatorSeats > 0 || spectators.length > 0) && (
+        <>
+          <div className="border-t border-gray-200 my-4"></div>
+          <h4 className="text-sm font-semibold text-gray-600 mb-2">
+            观战席 ({spectators.length}/{spectatorSeats || '-'})
+          </h4>
+          {spectators.length > 0 ? (
+            <div className="space-y-2">
+              {spectators.map((spectator) => (
+                <div
+                  key={spectator.id}
+                  className={`px-4 py-2 rounded-lg ${
+                    spectator.id === currentPlayerId
+                      ? 'bg-purple-50 border border-purple-200'
+                      : 'bg-gray-50'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-gray-900">{spectator.nickname}</span>
+                      <span className="text-xs px-2 py-0.5 bg-purple-100 text-purple-800 rounded-full">
+                        观战
+                      </span>
+                      {spectator.id === currentPlayerId && (
+                        <span className="text-xs px-2 py-0.5 bg-primary-100 text-primary-800 rounded-full">
+                          你
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <span className="text-purple-500">●</span>
+                      <span className="text-xs text-gray-600">在线</span>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-gray-500">暂无观战玩家</p>
+          )}
         </>
       )}
     </div>
