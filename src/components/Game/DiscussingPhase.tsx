@@ -4,8 +4,6 @@ import { Timer } from '../ui/Timer'
 import { Description, Player } from '@/types/game'
 import { Button } from '../ui/Button'
 import { ABSTAIN_VOTE_ID } from '@/lib/game/utils'
-import { VoteChat } from './VoteChat'
-import { VoteChatMessage } from '@/types/socket'
 
 interface DiscussingPhaseProps {
   discussionStartTime: number | null
@@ -15,9 +13,6 @@ interface DiscussingPhaseProps {
   currentPlayerId: string
   votes?: Record<string, string> // voterId -> targetId
   onVote: (targetId: string) => void
-  chatMessages?: VoteChatMessage[]
-  onSendChat?: (text: string) => void
-  chatDisabled?: boolean
 }
 
 export function DiscussingPhase({
@@ -28,9 +23,6 @@ export function DiscussingPhase({
   currentPlayerId,
   votes = {},
   onVote,
-  chatMessages = [],
-  onSendChat,
-  chatDisabled = false,
 }: DiscussingPhaseProps) {
   const currentPlayer = players.find(p => p.id === currentPlayerId)
   const hasVoted = votes[currentPlayerId] !== undefined
@@ -40,10 +32,27 @@ export function DiscussingPhase({
   const myVoteLabel =
     myVote === ABSTAIN_VOTE_ID ? '弃票' : players.find(p => p.id === myVote)?.nickname || '未知玩家'
 
-  const getVoteTargetLabel = (targetId: string | undefined) => {
-    if (!targetId) return '未投'
-    if (targetId === ABSTAIN_VOTE_ID) return '弃票'
-    return players.find(p => p.id === targetId)?.nickname || '未知玩家'
+  const voteCounts = alivePlayers.reduce(
+    (acc, player) => {
+      acc[player.id] = 0
+      return acc
+    },
+    {} as Record<string, number>
+  )
+  let abstainCount = 0
+
+  for (const voter of alivePlayers) {
+    const targetId = votes[voter.id]
+    if (!targetId) continue
+
+    if (targetId === ABSTAIN_VOTE_ID) {
+      abstainCount += 1
+      continue
+    }
+
+    if (voteCounts[targetId] !== undefined) {
+      voteCounts[targetId] += 1
+    }
   }
 
   return (
@@ -119,27 +128,24 @@ export function DiscussingPhase({
         </div>
 
         <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg mb-6">
-          <h4 className="text-sm font-semibold text-gray-700 mb-3">本轮投票指向</h4>
+          <h4 className="text-sm font-semibold text-gray-700 mb-3">本轮票数统计</h4>
           <div className="space-y-2">
-            {alivePlayers.map((voter) => {
-              const targetId = votes[voter.id]
-              const label = getVoteTargetLabel(targetId)
-              const isMe = voter.id === currentPlayerId
-              const hasVotedNow = targetId !== undefined
+            {alivePlayers.map((player) => (
+              <div key={player.id} className="flex items-center justify-between text-sm">
+                <span
+                  className={`font-medium ${player.id === currentPlayerId ? 'text-primary-700' : 'text-gray-900'}`}
+                >
+                  {player.nickname}
+                  {player.id === currentPlayerId ? '（你）' : ''}
+                </span>
+                <span className="font-semibold text-gray-900">{voteCounts[player.id] || 0} 票</span>
+              </div>
+            ))}
 
-              return (
-                <div key={voter.id} className="flex items-center justify-between text-sm">
-                  <span className={`font-medium ${isMe ? 'text-primary-700' : 'text-gray-900'}`}>
-                    {voter.nickname}
-                    {isMe ? '（你）' : ''}
-                  </span>
-                  <span className="text-gray-500 mx-2">→</span>
-                  <span className={hasVotedNow ? 'text-gray-900 font-semibold' : 'text-gray-400'}>
-                    {label}
-                  </span>
-                </div>
-              )
-            })}
+            <div className="flex items-center justify-between text-sm pt-2 border-t border-gray-200">
+              <span className="font-medium text-gray-700">弃票</span>
+              <span className="font-semibold text-gray-900">{abstainCount} 票</span>
+            </div>
           </div>
         </div>
 
@@ -210,14 +216,6 @@ export function DiscussingPhase({
         </div>
       </div>
 
-      {onSendChat && (
-        <VoteChat
-          messages={chatMessages}
-          currentPlayerId={currentPlayerId}
-          onSend={onSendChat}
-          disabled={chatDisabled}
-        />
-      )}
     </div>
   )
 }

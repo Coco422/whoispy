@@ -24,6 +24,7 @@ export interface ClientToServerEvents {
 
   // Game flow
   start_game: (data: { roomCode: string }, callback: (response: { success: boolean; error?: string }) => void) => void
+  set_description_draft: (data: { roomCode: string; text: string }) => void
   submit_description: (data: { roomCode: string; text: string }, callback: (response: { success: boolean; error?: string }) => void) => void
   submit_vote: (data: { roomCode: string; targetId: string }, callback: (response: { success: boolean; error?: string }) => void) => void
   send_vote_message: (data: { roomCode: string; text: string }, callback: (response: { success: boolean; error?: string }) => void) => void

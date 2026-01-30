@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { Description, Player } from '@/types/game'
 import { Button } from '../ui/Button'
 import { Input } from '../ui/Input'
@@ -15,6 +15,7 @@ interface DescriptionPhaseProps {
   descriptions: Description[]
   players: Player[]
   onSubmitDescription: (text: string) => void
+  onUpdateDraft?: (text: string) => void
   isSubmitting?: boolean
 }
 
@@ -27,17 +28,42 @@ export function DescriptionPhase({
   descriptions,
   players,
   onSubmitDescription,
+  onUpdateDraft,
   isSubmitting,
 }: DescriptionPhaseProps) {
   const [description, setDescription] = useState('')
+  const descriptionRef = useRef('')
+  const scrollRef = useRef<HTMLDivElement>(null)
 
   const isMyTurn = currentTurnPlayerId === currentPlayerId
+
+  // 自动滚动到底部
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+    }
+  }, [descriptions.length])
+
+  useEffect(() => {
+    if (isMyTurn) return
+    setDescription('')
+    descriptionRef.current = ''
+  }, [isMyTurn])
+
+  useEffect(() => {
+    // On refresh/rejoin during my turn, sync current input (usually empty) so server won't submit stale drafts.
+    if (!isMyTurn) return
+    onUpdateDraft?.(descriptionRef.current)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMyTurn, turnStartTime])
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     if (description.trim()) {
       onSubmitDescription(description.trim())
       setDescription('')
+      descriptionRef.current = ''
+      onUpdateDraft?.('')
     }
   }
 
@@ -76,7 +102,12 @@ export function DescriptionPhase({
               <Input
                 type="text"
                 value={description}
-                onChange={(e) => setDescription(e.target.value)}
+                onChange={(e) => {
+                  const next = e.target.value
+                  setDescription(next)
+                  descriptionRef.current = next
+                  onUpdateDraft?.(next)
+                }}
                 placeholder="输入你的描述..."
                 maxLength={200}
                 disabled={isSubmitting}
@@ -108,16 +139,21 @@ export function DescriptionPhase({
             还没有描述。第一位玩家将开始！
           </p>
         ) : (
-          <div className="space-y-3 max-h-96 overflow-y-auto">
+          <div ref={scrollRef} className="space-y-3 max-h-96 overflow-y-auto scroll-smooth">
             {descriptions.map((desc, index) => {
               const player = players.find(p => p.id === desc.playerId)
               const isCurrentPlayer = desc.playerId === currentPlayerId
+              const isLatest = index === descriptions.length - 1
 
               return (
                 <div
                   key={index}
-                  className={`p-4 rounded-lg ${
-                    isCurrentPlayer ? 'bg-primary-50 border border-primary-200' : 'bg-gray-50'
+                  className={`p-4 rounded-lg transition-all ${
+                    isLatest
+                      ? 'bg-yellow-50 border-2 border-yellow-300 shadow-md'
+                      : isCurrentPlayer
+                        ? 'bg-primary-50 border border-primary-200'
+                        : 'bg-gray-50'
                   }`}
                 >
                   <div className="flex items-start justify-between mb-2">

@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { connectSocket } from '@/lib/socket/client'
 import { useSocketEvent } from '@/lib/socket/hooks'
@@ -25,6 +25,7 @@ import { GameResultDisplay } from '@/components/Game/GameResult'
 import { GameEndedPhase } from '@/components/Game/GameEndedPhase'
 import { PlayerList } from '@/components/Game/PlayerList'
 import { RoomNotFound } from '@/components/Room/RoomNotFound'
+import { FloatingChat } from '@/components/Room/FloatingChat'
 
 export default function RoomPage() {
   const params = useParams()
@@ -50,8 +51,7 @@ export default function RoomPage() {
   const [voteResult, setVoteResult] = useState<any>(null)
   const [showVoteResult, setShowVoteResult] = useState(false)
   const [roomNotFound, setRoomNotFound] = useState(false)
-  const [voteChatMessages, setVoteChatMessages] = useState<VoteChatMessage[]>([])
-  const lastRoundRef = useRef<number | null>(null)
+  const [chatMessages, setChatMessages] = useState<VoteChatMessage[]>([])
 
   // If we previously stored a session for this room but it no longer exists, clear it.
   useEffect(() => {
@@ -60,8 +60,7 @@ export default function RoomPage() {
   }, [roomNotFound, roomCode])
 
   useEffect(() => {
-    setVoteChatMessages([])
-    lastRoundRef.current = null
+    setChatMessages([])
   }, [roomCode])
 
   // Try to get room data on mount (and on reconnect)
@@ -125,10 +124,6 @@ export default function RoomPage() {
       setGameResult(null)
     }
 
-    if (lastRoundRef.current !== null && data.currentRound !== lastRoundRef.current) {
-      setVoteChatMessages([])
-    }
-    lastRoundRef.current = data.currentRound
   })
 
   useSocketEvent('game_started', (data: { role: string; word: string }) => {
@@ -169,7 +164,7 @@ export default function RoomPage() {
   })
 
   useSocketEvent<VoteChatMessage>('vote_message', (data) => {
-    setVoteChatMessages((prev) => [...prev.slice(-99), data])
+    setChatMessages((prev) => [...prev.slice(-99), data])
   })
 
   useSocketEvent('player_left', () => {
@@ -198,7 +193,7 @@ export default function RoomPage() {
     const socket = connectSocket()
     socket.emit('leave_room', { roomCode })
     clearStoredRoomSession()
-    setVoteChatMessages([])
+    setChatMessages([])
     resetRoom()
     resetGame()
     router.push('/')
@@ -213,6 +208,11 @@ export default function RoomPage() {
         alert(response.error || 'Failed to submit description')
       }
     })
+  }
+
+  const handleUpdateDescriptionDraft = (text: string) => {
+    const socket = connectSocket()
+    socket.emit('set_description_draft', { roomCode, text })
   }
 
   const handleSubmitVote = (targetId: string) => {
@@ -230,7 +230,7 @@ export default function RoomPage() {
     })
   }
 
-  const handleSendVoteMessage = (text: string) => {
+  const handleSendChatMessage = (text: string) => {
     const socket = connectSocket()
     socket.emit('send_vote_message', { roomCode, text }, (response) => {
       if (!response.success) {
@@ -286,6 +286,11 @@ export default function RoomPage() {
   const canVote = Boolean(currentPlayer && currentPlayer.isAlive)
   const voteDisabledReason = isSpectator ? 'spectator' : currentPlayer && !currentPlayer.isAlive ? 'eliminated' : null
   const canChat = Boolean(currentPlayer) // allow eliminated players to chat, spectators read-only
+  const chatDisabledReason = isSpectator
+    ? '观战中，无法发言'
+    : !currentPlayer
+    ? '无法发言'
+    : undefined
   const alivePlayers = room.players.filter((p) => p.isAlive)
   const turnIndex =
     room.phase === GamePhase.DESCRIBING
@@ -352,6 +357,7 @@ export default function RoomPage() {
                 descriptions={room.descriptions}
                 players={room.players}
                 onSubmitDescription={handleSubmitDescription}
+                onUpdateDraft={handleUpdateDescriptionDraft}
                 isSubmitting={isSubmitting}
               />
             </div>
@@ -378,9 +384,6 @@ export default function RoomPage() {
                 currentPlayerId={playerId}
                 votes={room.votes}
                 onVote={handleSubmitVote}
-                chatMessages={voteChatMessages}
-                onSendChat={handleSendVoteMessage}
-                chatDisabled={!canChat}
               />
             </div>
             <div>
@@ -406,9 +409,6 @@ export default function RoomPage() {
                 onSubmitVote={handleSubmitVote}
                 isSubmitting={isSubmitting}
                 votes={room.votes}
-                chatMessages={voteChatMessages}
-                onSendChat={handleSendVoteMessage}
-                chatDisabled={!canChat}
                 canVote={canVote}
                 voteDisabledReason={voteDisabledReason}
               />
@@ -448,6 +448,14 @@ export default function RoomPage() {
           </div>
         )}
       </div>
+
+      <FloatingChat
+        messages={chatMessages}
+        currentPlayerId={playerId}
+        onSend={handleSendChatMessage}
+        disabled={!canChat}
+        disabledReason={chatDisabledReason}
+      />
     </div>
   )
 }

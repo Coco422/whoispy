@@ -21,6 +21,7 @@ export function initializeSocketServer(httpServer: HTTPServer) {
   // Track disconnected players with timeout to allow reconnection
   const disconnectTimeouts = new Map<string, NodeJS.Timeout>()
   const descriptionTimeouts = new Map<string, NodeJS.Timeout>()
+  const descriptionDrafts = new Map<string, Map<string, string>>() // roomCode -> (playerId -> draft)
   const reconnectGraceMs = (() => {
     const raw = Number(process.env.PLAYER_RECONNECT_GRACE_MS)
     return Number.isFinite(raw) && raw >= 0 ? raw : 30_000
@@ -32,6 +33,27 @@ export function initializeSocketServer(httpServer: HTTPServer) {
       clearTimeout(timeoutId)
       descriptionTimeouts.delete(roomCode)
     }
+  }
+
+  const setDescriptionDraft = (roomCode: string, playerId: string, text: string) => {
+    const byRoom = descriptionDrafts.get(roomCode) || new Map<string, string>()
+    byRoom.set(playerId, text)
+    descriptionDrafts.set(roomCode, byRoom)
+  }
+
+  const getDescriptionDraft = (roomCode: string, playerId: string) => {
+    return descriptionDrafts.get(roomCode)?.get(playerId)
+  }
+
+  const clearDescriptionDraft = (roomCode: string, playerId: string) => {
+    const byRoom = descriptionDrafts.get(roomCode)
+    if (!byRoom) return
+    byRoom.delete(playerId)
+    if (byRoom.size === 0) descriptionDrafts.delete(roomCode)
+  }
+
+  const clearRoomDrafts = (roomCode: string) => {
+    descriptionDrafts.delete(roomCode)
   }
 
   const scheduleDiscussionToVoting = (roomCode: string, room: Room) => {
@@ -113,10 +135,14 @@ export function initializeSocketServer(httpServer: HTTPServer) {
 
       if (currentPlayer.id !== expectedPlayerId) return
 
+      const draft = getDescriptionDraft(roomCode, currentPlayer.id) || ''
+      const finalText = draft.trim().slice(0, 200)
+      clearDescriptionDraft(roomCode, currentPlayer.id)
+
       const timeoutDescription: Description = {
         playerId: currentPlayer.id,
         nickname: currentPlayer.nickname,
-        text: '',
+        text: finalText,
         round: room.currentRound,
         timestamp: Date.now(),
       }
@@ -397,11 +423,13 @@ export function initializeSocketServer(httpServer: HTTPServer) {
       try {
         const { room, wasSpectator } = roomManager.removeMember(roomCode, playerId)
 
+        clearDescriptionDraft(roomCode, playerId)
         socket.leave(roomCode)
         socket.data.roomCode = undefined
 
         if (!room) {
           clearDescriptionTimeout(roomCode)
+          clearRoomDrafts(roomCode)
           return
         }
 
@@ -473,15 +501,16 @@ export function initializeSocketServer(httpServer: HTTPServer) {
           return
         }
 
-        // A valid description submission should cancel the turn timeout.
-        clearDescriptionTimeout(roomCode)
-
         const result = gameManager.submitDescription(room, playerId, text)
 
         if (!result.success) {
           callback({ success: false, error: result.error })
           return
         }
+
+        // A valid description submission should cancel the turn timeout and clear drafts.
+        clearDescriptionTimeout(roomCode)
+        clearDescriptionDraft(roomCode, playerId)
 
         // Broadcast the new description
         const description = room.descriptions[room.descriptions.length - 1]
@@ -503,6 +532,26 @@ export function initializeSocketServer(httpServer: HTTPServer) {
       } catch (error) {
         console.error('Error submitting description:', error)
         callback({ success: false, error: 'Failed to submit description' })
+      }
+    })
+
+    // SET DESCRIPTION DRAFT (for timeout auto-submit)
+    socket.on('set_description_draft', ({ roomCode, text }) => {
+      try {
+        const room = roomManager.getRoom(roomCode)
+        if (!room) return
+        if (room.phase !== GamePhase.DESCRIBING) return
+
+        const player = room.players.get(playerId)
+        if (!player || !player.isAlive) return
+
+        const currentPlayer = gameManager.getCurrentTurnPlayer(room)
+        if (!currentPlayer || currentPlayer.id !== playerId) return
+
+        const draft = typeof text === 'string' ? text.slice(0, 200) : ''
+        setDescriptionDraft(roomCode, playerId, draft)
+      } catch (error) {
+        console.error('Error setting description draft:', error)
       }
     })
 
@@ -553,7 +602,7 @@ export function initializeSocketServer(httpServer: HTTPServer) {
       }
     })
 
-    // VOTE CHAT (allowed during discussing/voting)
+    // ROOM CHAT (available in all phases)
     socket.on('send_vote_message', ({ roomCode, text }, callback) => {
       try {
         const room = roomManager.getRoom(roomCode)
@@ -565,11 +614,6 @@ export function initializeSocketServer(httpServer: HTTPServer) {
         const player = room.players.get(playerId)
         if (!player) {
           callback({ success: false, error: 'Not in this room' })
-          return
-        }
-
-        if (room.phase !== GamePhase.DISCUSSING && room.phase !== GamePhase.VOTING) {
-          callback({ success: false, error: 'Chat is only available during voting' })
           return
         }
 
@@ -690,6 +734,7 @@ export function initializeSocketServer(httpServer: HTTPServer) {
 	            }
 	          } else {
               clearDescriptionTimeout(roomCode)
+              clearRoomDrafts(roomCode)
 	            console.log(`Room ${roomCode} deleted after player ${playerId} removed`)
 	          }
 
