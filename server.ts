@@ -17,9 +17,32 @@ app.prepare().then(() => {
       const parsedUrl = parse(req.url!, true)
       await handle(req, res, parsedUrl)
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      const actionId = req.headers['next-action']
+
+      // Next.js Server Actions mismatch (often from stale clients/bots); respond gracefully instead of noisy stack traces.
+      if (message.includes('Failed to find Server Action')) {
+        console.warn('Server Action not found', {
+          url: req.url,
+          method: req.method,
+          actionId,
+          userAgent: req.headers['user-agent'],
+        })
+
+        if (!res.headersSent && !res.writableEnded) {
+          res.statusCode = 409
+          res.setHeader('Cache-Control', 'no-store')
+          res.setHeader('Content-Type', 'text/plain; charset=utf-8')
+          res.end('Deployment updated or invalid action. Please refresh the page and try again.')
+        }
+        return
+      }
+
       console.error('Error occurred handling', req.url, err)
-      res.statusCode = 500
-      res.end('internal server error')
+      if (!res.headersSent && !res.writableEnded) {
+        res.statusCode = 500
+        res.end('internal server error')
+      }
     }
   })
 

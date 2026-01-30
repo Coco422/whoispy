@@ -5,7 +5,7 @@ import { roomManager } from './room-manager'
 import { gameManager } from './game-manager'
 import { validateNickname, validateRoomCode, ABSTAIN_VOTE_ID } from '@/lib/game/utils'
 import { v4 as uuidv4 } from 'uuid'
-import { Description, GamePhase, Room } from '@/types/game'
+import { Description, GamePhase, GameResult, PlayerRole, Room } from '@/types/game'
 
 export function initializeSocketServer(httpServer: HTTPServer) {
   const io = new SocketIOServer<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>(
@@ -54,6 +54,33 @@ export function initializeSocketServer(httpServer: HTTPServer) {
 
   const clearRoomDrafts = (roomCode: string) => {
     descriptionDrafts.delete(roomCode)
+  }
+
+  const endGameBecauseSpyLeft = (
+    roomCode: string,
+    room: Room,
+    spy: { id: string; nickname: string; word?: string | null }
+  ) => {
+    if (room.phase === GamePhase.WAITING || room.phase === GamePhase.ENDED) return
+
+    const fallbackCivilianWord =
+      Array.from(room.players.values()).find((p) => p.role === PlayerRole.CIVILIAN && p.word)?.word || ''
+
+    const result: GameResult = {
+      winner: 'civilians',
+      spyId: spy.id,
+      spyNickname: spy.nickname,
+      wordA: room.wordA || fallbackCivilianWord,
+      wordB: room.wordB || spy.word || '',
+      rounds: room.currentRound || 1,
+    }
+
+    clearDescriptionTimeout(roomCode)
+    gameManager.endGame(room, result)
+    io.to(roomCode).emit('game_over', result)
+
+    // After game ends, try to promote spectators into player slots (FIFO) if available.
+    roomManager.promoteSpectators(room)
   }
 
   const scheduleDiscussionToVoting = (roomCode: string, room: Room) => {
@@ -421,6 +448,10 @@ export function initializeSocketServer(httpServer: HTTPServer) {
     // LEAVE ROOM
     socket.on('leave_room', ({ roomCode }) => {
       try {
+        const roomBefore = roomManager.getRoom(roomCode)
+        const leavingPlayer = roomBefore?.players.get(playerId)
+        const leavingWasSpy = leavingPlayer?.role === PlayerRole.SPY
+
         const { room, wasSpectator } = roomManager.removeMember(roomCode, playerId)
 
         clearDescriptionDraft(roomCode, playerId)
@@ -431,6 +462,14 @@ export function initializeSocketServer(httpServer: HTTPServer) {
           clearDescriptionTimeout(roomCode)
           clearRoomDrafts(roomCode)
           return
+        }
+
+        if (!wasSpectator && leavingWasSpy && leavingPlayer) {
+          endGameBecauseSpyLeft(roomCode, room, {
+            id: leavingPlayer.id,
+            nickname: leavingPlayer.nickname,
+            word: leavingPlayer.word,
+          })
         }
 
         if (!wasSpectator && (room.phase === GamePhase.WAITING || room.phase === GamePhase.ENDED)) {
@@ -718,9 +757,22 @@ export function initializeSocketServer(httpServer: HTTPServer) {
 	      if (roomCode) {
 	        // Don't remove player immediately - give them time to refresh/reconnect
 	        const timeoutId = setTimeout(() => {
+            const roomBefore = roomManager.getRoom(roomCode)
+            const leavingPlayer = roomBefore?.players.get(playerId)
+            const leavingWasSpy = leavingPlayer?.role === PlayerRole.SPY
+
+            clearDescriptionDraft(roomCode, playerId)
 	          const { room, wasSpectator } = roomManager.removeMember(roomCode, playerId)
 
 	          if (room) {
+              if (!wasSpectator && leavingWasSpy && leavingPlayer) {
+                endGameBecauseSpyLeft(roomCode, room, {
+                  id: leavingPlayer.id,
+                  nickname: leavingPlayer.nickname,
+                  word: leavingPlayer.word,
+                })
+              }
+
 	            if (!wasSpectator && (room.phase === GamePhase.WAITING || room.phase === GamePhase.ENDED)) {
 	              roomManager.promoteSpectators(room)
 	            }
@@ -753,6 +805,9 @@ export function initializeSocketServer(httpServer: HTTPServer) {
 
   // Helper function to process voting results
   function processVotingResults(io: SocketIOServer, room: any) {
+    if (!room) return
+    if (room.phase !== GamePhase.VOTING && room.phase !== GamePhase.DISCUSSING) return
+
     const voteResult = gameManager.processVotes(room)
 
     // Broadcast vote results
@@ -765,30 +820,40 @@ export function initializeSocketServer(httpServer: HTTPServer) {
     // Check win condition
     const gameResult = gameManager.checkWinCondition(room)
 
-	    if (gameResult) {
-	      // Game over
-	      setTimeout(() => {
-	        gameManager.endGame(room, gameResult)
-	        io.to(room.code).emit('game_over', gameResult)
+    const roomCode = room.code as string
 
-	        // After game ends, try to promote spectators into player slots (FIFO) if available.
-	        roomManager.promoteSpectators(room)
+	  if (gameResult) {
+	    // Game over
+	    setTimeout(() => {
+	      const latestRoom = roomManager.getRoom(roomCode)
+	      if (!latestRoom) return
+	      if (latestRoom.phase !== GamePhase.RESULT) return
 
-	        const serialized = roomManager.serializeRoom(room)
-	        io.to(room.code).emit('room_update', serialized)
-	      }, 3000) // Delay to show vote result first
-	    } else {
-      // Continue to next round
-      setTimeout(() => {
-        gameManager.startNextRound(room)
+	      gameManager.endGame(latestRoom, gameResult)
+	      io.to(roomCode).emit('game_over', gameResult)
 
-        const serialized = roomManager.serializeRoom(room)
-        io.to(room.code).emit('room_update', serialized)
+	      // After game ends, try to promote spectators into player slots (FIFO) if available.
+	      roomManager.promoteSpectators(latestRoom)
 
-        // Start first turn of new round
-        startCurrentTurn(room.code, room)
-      }, 3000)
-    }
+	      const serialized = roomManager.serializeRoom(latestRoom)
+	      io.to(roomCode).emit('room_update', serialized)
+	    }, 3000) // Delay to show vote result first
+	  } else {
+	    // Continue to next round
+	    setTimeout(() => {
+	      const latestRoom = roomManager.getRoom(roomCode)
+	      if (!latestRoom) return
+	      if (latestRoom.phase !== GamePhase.RESULT) return
+
+	      gameManager.startNextRound(latestRoom)
+
+	      const serialized = roomManager.serializeRoom(latestRoom)
+	      io.to(roomCode).emit('room_update', serialized)
+
+	      // Start first turn of new round
+	      startCurrentTurn(roomCode, latestRoom)
+	    }, 3000)
+	  }
   }
 
   console.log('Socket.io server initialized')
