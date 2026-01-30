@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import prisma from '@/lib/db/prisma'
+import { getWordPairStore } from '@/lib/db/word-store'
 
 // GET /api/words - Get all word pairs (with optional filter)
 export async function GET(request: NextRequest) {
@@ -7,12 +7,8 @@ export async function GET(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams
     const enabledOnly = searchParams.get('enabled') === 'true'
 
-    const where = enabledOnly ? { enabled: true } : {}
-
-    const wordPairs = await prisma.wordPair.findMany({
-      where,
-      orderBy: { createdAt: 'desc' },
-    })
+    const store = await getWordPairStore()
+    const wordPairs = await store.findMany({ enabledOnly })
 
     return NextResponse.json({ wordPairs })
   } catch (error) {
@@ -31,7 +27,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
-    const body = await request.json()
+    const body = await request.json() as { wordA?: string; wordB?: string }
     const { wordA, wordB } = body
 
     if (!wordA || !wordB) {
@@ -46,11 +42,10 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Words must be 50 characters or less' }, { status: 400 })
     }
 
-    const wordPair = await prisma.wordPair.create({
-      data: {
-        wordA: wordA.trim(),
-        wordB: wordB.trim(),
-      },
+    const store = await getWordPairStore()
+    const wordPair = await store.create({
+      wordA: wordA.trim(),
+      wordB: wordB.trim(),
     })
 
     return NextResponse.json({ wordPair }, { status: 201 })

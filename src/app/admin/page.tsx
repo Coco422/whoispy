@@ -58,7 +58,7 @@ export default function AdminPage() {
   const fetchWordPairs = async () => {
     try {
       const response = await fetch('/api/words')
-      const data = await response.json()
+      const data = (await response.json()) as { wordPairs: WordPair[] }
       setWordPairs(data.wordPairs)
     } catch (error) {
       console.error('Error fetching word pairs:', error)
@@ -86,7 +86,7 @@ export default function AdminPage() {
         setNewWordB('')
         fetchWordPairs()
       } else {
-        const data = await response.json()
+        const data = (await response.json()) as { error?: string }
         setError(data.error || 'Failed to add word pair')
       }
     } catch (error) {
@@ -116,7 +116,7 @@ export default function AdminPage() {
         setEditWordB('')
         fetchWordPairs()
       } else {
-        const data = await response.json()
+        const data = (await response.json()) as { error?: string }
         setError(data.error || 'Failed to update word pair')
       }
     } catch (error) {
@@ -215,12 +215,12 @@ export default function AdminPage() {
         body: JSON.stringify({ pairs }),
       })
 
-      const data = await response.json()
+      const data = (await response.json()) as { imported?: number; skipped?: number; errors?: string[]; error?: string }
 
       if (response.ok) {
         setBatchResult({
-          imported: data.imported,
-          skipped: data.skipped,
+          imported: data.imported ?? 0,
+          skipped: data.skipped ?? 0,
           errors: data.errors || [],
         })
         setBatchInput('')

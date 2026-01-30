@@ -1,6 +1,6 @@
 import { Room, Player, PlayerRole, GamePhase, Description, VoteResult, GameResult } from '@/types/game'
 import { shuffle, randomItem, countVotes, getAlivePlayers, isSpy } from '@/lib/game/utils'
-import prisma from '@/lib/db/prisma'
+import { getWordPairStore } from '@/lib/db/word-store'
 
 export class GameManager {
   /**
@@ -20,22 +20,17 @@ export class GameManager {
     }
 
     // Get enabled word pairs from database, excluding already used ones
-    const wordPairs = await prisma.wordPair.findMany({
-      where: {
-        enabled: true,
-        id: {
-          notIn: room.usedWordPairIds,
-        },
-      },
+    const store = await getWordPairStore()
+    const wordPairs = await store.findMany({
+      enabledOnly: true,
+      excludeIds: room.usedWordPairIds,
     })
 
     // If no unused word pairs, reset the used list and fetch all enabled pairs
     if (wordPairs.length === 0) {
       console.log(`Room ${room.code}: All word pairs used, resetting history`)
       room.usedWordPairIds = []
-      const allWordPairs = await prisma.wordPair.findMany({
-        where: { enabled: true },
-      })
+      const allWordPairs = await store.findMany({ enabledOnly: true })
 
       if (allWordPairs.length === 0) {
         return { success: false, error: 'No word pairs available' }

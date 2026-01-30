@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import prisma from '@/lib/db/prisma'
+import { getWordPairStore } from '@/lib/db/word-store'
 
 // POST /api/words/batch - Batch import word pairs (admin only)
 export async function POST(request: NextRequest) {
@@ -11,12 +11,14 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
-    const body = await request.json()
+    const body = await request.json() as { pairs?: Array<{ wordA?: string; wordB?: string }> }
     const { pairs } = body
 
     if (!Array.isArray(pairs) || pairs.length === 0) {
       return NextResponse.json({ error: 'pairs must be a non-empty array' }, { status: 400 })
     }
+
+    const store = await getWordPairStore()
 
     // Validate and deduplicate pairs
     const validPairs: Array<{ wordA: string; wordB: string }> = []
@@ -50,14 +52,8 @@ export async function POST(request: NextRequest) {
         continue // Skip duplicate
       }
 
-      // Check if already exists in database
-      const existing = await prisma.wordPair.findFirst({
-        where: {
-          wordA,
-          wordB,
-        },
-      })
-
+      // Check if already exists
+      const existing = await store.findByWords(wordA, wordB)
       if (existing) {
         continue // Skip existing
       }
@@ -67,16 +63,15 @@ export async function POST(request: NextRequest) {
     }
 
     // Batch insert
+    let imported = 0
     if (validPairs.length > 0) {
-      await prisma.wordPair.createMany({
-        data: validPairs,
-      })
+      imported = await store.createMany(validPairs)
     }
 
     return NextResponse.json({
       success: true,
-      imported: validPairs.length,
-      skipped: pairs.length - validPairs.length,
+      imported,
+      skipped: pairs.length - imported,
       errors,
     })
   } catch (error) {

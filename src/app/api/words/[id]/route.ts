@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import prisma from '@/lib/db/prisma'
+import { getWordPairStore } from '@/lib/db/word-store'
 
 // PUT /api/words/[id] - Update a word pair (admin only)
 export async function PUT(request: NextRequest, { params }: { params: { id: string } }) {
@@ -11,10 +11,10 @@ export async function PUT(request: NextRequest, { params }: { params: { id: stri
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
-    const body = await request.json()
+    const body = await request.json() as { wordA?: string; wordB?: string; enabled?: boolean }
     const { wordA, wordB, enabled } = body
 
-    const updateData: any = {}
+    const updateData: { wordA?: string; wordB?: string; enabled?: boolean } = {}
 
     if (wordA !== undefined) {
       if (wordA.trim().length === 0) {
@@ -40,16 +40,15 @@ export async function PUT(request: NextRequest, { params }: { params: { id: stri
       updateData.enabled = Boolean(enabled)
     }
 
-    const wordPair = await prisma.wordPair.update({
-      where: { id: params.id },
-      data: updateData,
-    })
+    const store = await getWordPairStore()
+    const wordPair = await store.update(params.id, updateData)
 
-    return NextResponse.json({ wordPair })
-  } catch (error: any) {
-    if (error.code === 'P2025') {
+    if (!wordPair) {
       return NextResponse.json({ error: 'Word pair not found' }, { status: 404 })
     }
+
+    return NextResponse.json({ wordPair })
+  } catch (error) {
     console.error('Error updating word pair:', error)
     return NextResponse.json({ error: 'Failed to update word pair' }, { status: 500 })
   }
@@ -65,15 +64,15 @@ export async function DELETE(request: NextRequest, { params }: { params: { id: s
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
-    await prisma.wordPair.delete({
-      where: { id: params.id },
-    })
+    const store = await getWordPairStore()
+    const deleted = await store.delete(params.id)
 
-    return NextResponse.json({ success: true })
-  } catch (error: any) {
-    if (error.code === 'P2025') {
+    if (!deleted) {
       return NextResponse.json({ error: 'Word pair not found' }, { status: 404 })
     }
+
+    return NextResponse.json({ success: true })
+  } catch (error) {
     console.error('Error deleting word pair:', error)
     return NextResponse.json({ error: 'Failed to delete word pair' }, { status: 500 })
   }
