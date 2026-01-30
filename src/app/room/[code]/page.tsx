@@ -6,7 +6,12 @@ import { connectSocket } from '@/lib/socket/client'
 import { useSocketEvent } from '@/lib/socket/hooks'
 import { useRoomStore } from '@/stores/room-store'
 import { useGameStore } from '@/stores/game-store'
-import { GamePhase, PlayerRole } from '@/types/game'
+import { GamePhase, PlayerRole, SerializedRoom } from '@/types/game'
+import {
+  clearStoredRoomSession,
+  clearStoredRoomSessionIfMatches,
+  setStoredRoomSession,
+} from '@/lib/storage/room-session'
 
 // Components
 import { WaitingRoom } from '@/components/Room/WaitingRoom'
@@ -45,42 +50,63 @@ export default function RoomPage() {
   const [showVoteResult, setShowVoteResult] = useState(false)
   const [roomNotFound, setRoomNotFound] = useState(false)
 
-  // Try to get room data on mount
+  // If we previously stored a session for this room but it no longer exists, clear it.
+  useEffect(() => {
+    if (!roomNotFound) return
+    clearStoredRoomSessionIfMatches(roomCode)
+  }, [roomNotFound, roomCode])
+
+  // Try to get room data on mount (and on reconnect)
   useEffect(() => {
     const socket = connectSocket()
+    let isCancelled = false
 
-    // If we already have room data (from home page), we're good
-    if (room && room.code === roomCode) {
-      return
+    const attemptRejoin = () => {
+      const currentRoom = useRoomStore.getState().room
+      if (currentRoom && currentRoom.code === roomCode) {
+        setRoomNotFound(false)
+        return
+      }
+
+      socket.emit('rejoin_room', { roomCode }, (response) => {
+        if (isCancelled) return
+        if (!response.success) {
+          // Not in this room, show 404
+          setRoomNotFound(true)
+          return
+        }
+        setRoomNotFound(false)
+        // Success case: room_update event will set the room data
+      })
     }
 
-    // Try to rejoin - the server will send room_update if we're in the room
-    // This handles both reconnection scenarios:
-    // 1. Page navigation (socket might disconnect/reconnect)
-    // 2. Direct URL access (if we were in this room before)
-    socket.emit('rejoin_room', { roomCode }, (response) => {
-      if (!response.success) {
-        // Not in this room, show 404
-        setRoomNotFound(true)
-      }
-      // Success case: room_update event will set the room data
-    })
+    attemptRejoin()
 
     // Fallback timeout - if no response within 5 seconds, show 404
     const timeoutId = setTimeout(() => {
-      if (!room || room.code !== roomCode) {
-        setRoomNotFound(true)
-      }
+      if (isCancelled) return
+      const latestRoom = useRoomStore.getState().room
+      if (!latestRoom || latestRoom.code !== roomCode) setRoomNotFound(true)
     }, 5000)
 
+    const handleConnect = () => {
+      attemptRejoin()
+    }
+    socket.on('connect', handleConnect)
+
     return () => {
+      isCancelled = true
       clearTimeout(timeoutId)
+      socket.off('connect', handleConnect)
     }
   }, [roomCode]) // Only depend on roomCode, not room
 
   // Socket event handlers
-  useSocketEvent('room_update', (data) => {
+  useSocketEvent<SerializedRoom>('room_update', (data) => {
+    setRoomNotFound(false)
     setRoom(data)
+    const nickname = playerId ? data.players.find((p) => p.id === playerId)?.nickname : undefined
+    setStoredRoomSession({ roomCode: data.code, nickname })
   })
 
   useSocketEvent('game_started', (data: { role: string; word: string }) => {
@@ -145,6 +171,7 @@ export default function RoomPage() {
   const handleLeaveRoom = () => {
     const socket = connectSocket()
     socket.emit('leave_room', { roomCode })
+    clearStoredRoomSession()
     resetRoom()
     resetGame()
     router.push('/')

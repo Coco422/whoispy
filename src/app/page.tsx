@@ -7,12 +7,18 @@ import { JoinRoom } from '@/components/Room/JoinRoom'
 import { connectSocket } from '@/lib/socket/client'
 import { useSocketEvent } from '@/lib/socket/hooks'
 import { useRoomStore } from '@/stores/room-store'
+import {
+  clearStoredRoomSession,
+  getStoredRoomSession,
+  setStoredRoomSession,
+} from '@/lib/storage/room-session'
 
 export default function HomePage() {
   const router = useRouter()
   const [mode, setMode] = useState<'none' | 'create' | 'join'>('none')
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState('')
+  const [resumeSession, setResumeSession] = useState<ReturnType<typeof getStoredRoomSession>>(null)
 
   const { setPlayerId, setRoom } = useRoomStore()
 
@@ -22,6 +28,10 @@ export default function HomePage() {
     return () => {
       // Don't disconnect on unmount, keep connection alive
     }
+  }, [])
+
+  useEffect(() => {
+    setResumeSession(getStoredRoomSession())
   }, [])
 
   useSocketEvent('connected', (data: { playerId: string }) => {
@@ -45,6 +55,8 @@ export default function HomePage() {
 
     socket.emit('create_room', { nickname, descriptionTime, discussionTime }, (response) => {
       if (response.success && response.roomCode) {
+        setStoredRoomSession({ roomCode: response.roomCode, nickname })
+        setResumeSession(getStoredRoomSession())
         setIsLoading(false)
         router.push(`/room/${response.roomCode}`)
       } else {
@@ -62,6 +74,8 @@ export default function HomePage() {
 
     socket.emit('join_room', { roomCode, nickname }, (response) => {
       if (response.success) {
+        setStoredRoomSession({ roomCode, nickname })
+        setResumeSession(getStoredRoomSession())
         setIsLoading(false)
         router.push(`/room/${roomCode}`)
       } else {
@@ -88,6 +102,35 @@ export default function HomePage() {
         {/* Mode selection or forms */}
         {mode === 'none' ? (
           <div className="space-y-3">
+            {resumeSession?.roomCode && (
+              <div className="p-4 rounded-xl bg-white border border-gray-200 shadow-sm">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-sm text-gray-500">检测到上次房间</p>
+                    <p className="font-mono font-semibold text-gray-900 truncate">
+                      {resumeSession.roomCode}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => router.push(`/room/${resumeSession.roomCode}`)}
+                      className="px-3 py-2 bg-gray-900 text-white text-sm font-semibold rounded-lg hover:bg-gray-800 transition-colors"
+                    >
+                      继续
+                    </button>
+                    <button
+                      onClick={() => {
+                        clearStoredRoomSession()
+                        setResumeSession(null)
+                      }}
+                      className="px-3 py-2 bg-gray-100 text-gray-700 text-sm font-semibold rounded-lg hover:bg-gray-200 transition-colors"
+                    >
+                      清除
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
             <button
               onClick={() => setMode('create')}
               className="w-full px-6 py-4 bg-primary-600 text-white font-semibold rounded-xl hover:bg-primary-700 transition-colors shadow-lg"

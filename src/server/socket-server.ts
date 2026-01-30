@@ -20,6 +20,10 @@ export function initializeSocketServer(httpServer: HTTPServer) {
 
   // Track disconnected players with timeout to allow reconnection
   const disconnectTimeouts = new Map<string, NodeJS.Timeout>()
+  const reconnectGraceMs = (() => {
+    const raw = Number(process.env.PLAYER_RECONNECT_GRACE_MS)
+    return Number.isFinite(raw) && raw >= 0 ? raw : 30_000
+  })()
 
   // Clean up inactive rooms every 30 minutes
   setInterval(() => {
@@ -435,7 +439,7 @@ export function initializeSocketServer(httpServer: HTTPServer) {
 
       const roomCode = socket.data.roomCode
       if (roomCode) {
-        // Don't remove player immediately - give them 5 seconds to reconnect
+        // Don't remove player immediately - give them time to refresh/reconnect
         const timeoutId = setTimeout(() => {
           const { room, wasHost } = roomManager.removePlayer(roomCode, playerId)
 
@@ -449,7 +453,7 @@ export function initializeSocketServer(httpServer: HTTPServer) {
           }
 
           disconnectTimeouts.delete(playerId)
-        }, 5000) // 5 second grace period
+        }, reconnectGraceMs)
 
         disconnectTimeouts.set(playerId, timeoutId)
       }

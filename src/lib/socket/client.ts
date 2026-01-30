@@ -34,7 +34,8 @@ export function getSocket(): Socket<ServerToClientEvents, ClientToServerEvents> 
     socket = io(url, {
       autoConnect: false,
       reconnection: true,
-      reconnectionAttempts: 5,
+      // Keep retrying so temporary network issues / refreshes don't "lose" the player.
+      reconnectionAttempts: Infinity,
       reconnectionDelay: 1000,
       auth: storedPlayerId ? { playerId: storedPlayerId } : {},
     })
