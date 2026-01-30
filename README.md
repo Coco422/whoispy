@@ -86,6 +86,33 @@ whoispy/
 - `npm run start` - Start production server
 - `npm run db:studio` - Open Prisma Studio
 
+## Deployment (PM2)
+
+If you want to run the application in the background using PM2:
+
+1. Install PM2 globally:
+   ```bash
+   npm install -g pm2
+   ```
+
+2. Build the project:
+   ```bash
+   npm run build
+   ```
+
+3. Start with PM2:
+   ```bash
+   pm2 start ecosystem.config.js --env production
+   ```
+
+4. Common PM2 commands:
+   ```bash
+   pm2 status          # View process status
+   pm2 logs whoispy    # View logs
+   pm2 restart whoispy # Restart application
+   pm2 stop whoispy    # Stop application
+   ```
+
 ## Deployment
 
 See deployment guide in docs/DEPLOYMENT.md
