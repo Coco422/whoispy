@@ -2,7 +2,7 @@
   "compilerOptions": {
     "target": "es2017",
     "lib": ["dom", "dom.iterable", "esnext"],
-    "types": ["@cloudflare/workers-types"],
+    "types": ["node", "@cloudflare/workers-types"],
     "allowJs": true,
     "skipLibCheck": true,
     "strict": true,

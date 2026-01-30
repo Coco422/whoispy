@@ -1,10 +1,11 @@
+import 'dotenv/config'
 import { createServer } from 'http'
 import { parse } from 'url'
 import next from 'next'
 import { initializeSocketServer } from './src/server/socket-server'
 
 const dev = process.env.NODE_ENV !== 'production'
-const hostname = 'localhost'
+const hostname = '0.0.0.0'
 const port = parseInt(process.env.PORT || '3000', 10)
 
 const app = next({ dev, hostname, port })
